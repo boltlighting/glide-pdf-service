@@ -131,10 +131,12 @@ app.post("/generate", async (req, res) => {
     const pdfBuffer = await done;
 // Return PDF as base64 inside JSON (for Glide)
 const pdfBase64 = pdfBuffer.toString("base64");
-return res.json({
-  filename: "shotlist.pdf",
-  pdfBase64,
+res.json({
+  filename: 'shotlist.pdf',
+  pdfBase64,                // keep this for now
+  pdfUrl: 'https://example.com/test.pdf' // temp HTTPS URL
 });
+
 
 
   } catch (err) {
