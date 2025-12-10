@@ -1,0 +1,160 @@
+import dotenv from "dotenv";
+dotenv.config();
+import express from "express";
+import PDFDocument from "pdfkit";
+import sharp from "sharp";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { v4 as uuid } from "uuid";
+
+const app = express();
+app.use(express.json({ limit: "10mb" }));
+
+// --- S3 CONFIG (to be set in Render later) ---
+const s3 = new S3Client({
+  region: process.env.S3_REGION,
+  endpoint: process.env.S3_ENDPOINT || undefined,
+  credentials: {
+    accessKeyId: process.env.S3_ACCESS_KEY,
+    secretAccessKey: process.env.S3_SECRET_KEY
+  },
+  forcePathStyle: !!process.env.S3_ENDPOINT
+});
+
+const BUCKET = process.env.S3_BUCKET;
+
+// Node 18+ fetch
+const fetchFn = globalThis.fetch;
+
+// --------------------------------------------------------
+// 🔥 FLEXIBLE GRID LOGIC
+// --------------------------------------------------------
+// Based on number of images to place on this page,
+// choose the best row/column layout automatically.
+function chooseGrid(imagesLeft) {
+  // Rules of thumb tuned for good readability:
+  
+  if (imagesLeft === 1) return { rows: 1, cols: 1 };
+  if (imagesLeft === 2) return { rows: 1, cols: 2 };
+  if (imagesLeft <= 3) return { rows: 1, cols: imagesLeft };
+  if (imagesLeft <= 4) return { rows: 2, cols: 2 };
+  if (imagesLeft <= 6) return { rows: 2, cols: 3 };
+  if (imagesLeft <= 8) return { rows: 2, cols: 4 };
+  if (imagesLeft <= 9) return { rows: 3, cols: 3 };
+  if (imagesLeft <= 10) return { rows: 2, cols: 5 };
+  if (imagesLeft <= 12) return { rows: 3, cols: 4 };
+
+  // fallback for large sets (default 10 per page)
+  return { rows: 2, cols: 5 };
+}
+
+// --------------------------------------------------------
+
+app.post("/generate", async (req, res) => {
+  try {
+    let { title, description, images } = req.body || {};
+
+    if (typeof images === "string") {
+      images = images.split(",").map(s => s.trim()).filter(Boolean);
+    }
+
+    if (!Array.isArray(images) || images.length === 0) {
+      return res.status(400).json({ error: "no images provided" });
+    }
+
+    // Create PDF
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 40,
+      autoFirstPage: false
+    });
+
+    const chunks = [];
+    doc.on("data", chunk => chunks.push(chunk));
+    const done = new Promise((resolve, reject) => {
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
+    });
+
+    // ---------------------------
+    // Intro page
+    // ---------------------------
+    doc.addPage();
+    doc.fontSize(22).text(title || "Shot List", { align: "center" });
+    doc.moveDown();
+    if (description) {
+      doc.fontSize(12).text(description, { align: "center" });
+    }
+
+    // ---------------------------
+    // Image Pages (dynamic grid)
+    // ---------------------------
+    let remaining = images.length;
+    let index = 0;
+
+    while (remaining > 0) {
+      const { rows, cols } = chooseGrid(remaining);
+      const perPage = rows * cols;
+
+      doc.addPage();
+
+      // Calculate area
+      const usableWidth =
+        doc.page.width - doc.page.margins.left - doc.page.margins.right;
+      const usableHeight =
+        doc.page.height - doc.page.margins.top - doc.page.margins.bottom;
+
+      const cellWidth = usableWidth / cols;
+      const cellHeight = usableHeight / rows;
+
+      // Fill this page
+      for (let i = 0; i < perPage && index < images.length; i++, index++) {
+        const url = images[index];
+
+        try {
+          const resp = await fetchFn(url);
+          if (!resp.ok) continue;
+          const buf = Buffer.from(await resp.arrayBuffer());
+
+          // Resize + compress
+          const resized = await sharp(buf)
+            .resize({ width: 1200, withoutEnlargement: true })
+            .jpeg({ quality: 80 })
+            .toBuffer();
+
+          // Position
+          const row = Math.floor(i / cols);
+          const col = i % cols;
+
+          const x = doc.page.margins.left + col * cellWidth;
+          const y = doc.page.margins.top + row * cellHeight;
+
+          doc.image(resized, x, y, {
+            fit: [cellWidth - 10, cellHeight - 10],
+            align: "center",
+            valign: "center"
+          });
+        } catch (e) {
+          console.error("Image failed:", url, e);
+        }
+      }
+
+      remaining -= perPage;
+    }
+
+    doc.end();
+    const pdfBuffer = await done;
+// Return PDF directly to the client (Glide)
+res.setHeader("Content-Type", "application/pdf");
+res.setHeader("Content-Disposition", "attachment; filename=generated.pdf");
+return res.send(pdfBuffer);
+
+  } catch (err) {
+    console.error("PDF error:", err);
+    res.status(500).json({ error: "PDF generation failed" });
+  }
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`PDF service running on port ${PORT}`);
+});
