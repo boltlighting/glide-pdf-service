@@ -2,23 +2,38 @@ import express from "express";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
 import { v4 as uuid } from "uuid";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
+// If you ever use S3 later; safe to leave here.
 const BUCKET = process.env.S3_BUCKET;
 
 // Node 18+ fetch
 const fetchFn = globalThis.fetch;
 
 // --------------------------------------------------------
+// ESM-compatible __dirname
+// --------------------------------------------------------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// --------------------------------------------------------
+// Serve PDFs from /pdfs over HTTPS
+// --------------------------------------------------------
+const pdfDir = path.join(__dirname, "pdfs");
+// Make sure the folder exists (ok if it already does)
+fs.mkdirSync(pdfDir, { recursive: true });
+
+app.use("/pdfs", express.static(pdfDir));
+
+// --------------------------------------------------------
 // 🔥 FLEXIBLE GRID LOGIC
 // --------------------------------------------------------
-// Based on number of images to place on this page,
-// choose the best row/column layout automatically.
 function chooseGrid(imagesLeft) {
-  // Rules of thumb tuned for good readability:
-  
   if (imagesLeft === 1) return { rows: 1, cols: 1 };
   if (imagesLeft === 2) return { rows: 1, cols: 2 };
   if (imagesLeft <= 3) return { rows: 1, cols: imagesLeft };
@@ -34,13 +49,17 @@ function chooseGrid(imagesLeft) {
 }
 
 // --------------------------------------------------------
-
+// Main endpoint
+// --------------------------------------------------------
 app.post("/generate", async (req, res) => {
   try {
     let { title, description, images } = req.body || {};
 
     if (typeof images === "string") {
-      images = images.split(",").map(s => s.trim()).filter(Boolean);
+      images = images
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
     }
 
     if (!Array.isArray(images) || images.length === 0) {
@@ -51,11 +70,11 @@ app.post("/generate", async (req, res) => {
     const doc = new PDFDocument({
       size: "A4",
       margin: 40,
-      autoFirstPage: false
+      autoFirstPage: false,
     });
 
     const chunks = [];
-    doc.on("data", chunk => chunks.push(chunk));
+    doc.on("data", (chunk) => chunks.push(chunk));
     const done = new Promise((resolve, reject) => {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
@@ -117,7 +136,7 @@ app.post("/generate", async (req, res) => {
           doc.image(resized, x, y, {
             fit: [cellWidth - 10, cellHeight - 10],
             align: "center",
-            valign: "center"
+            valign: "center",
           });
         } catch (e) {
           console.error("Image failed:", url, e);
@@ -129,16 +148,29 @@ app.post("/generate", async (req, res) => {
 
     doc.end();
     const pdfBuffer = await done;
-// Return PDF as base64 inside JSON (for Glide)
-const pdfBase64 = pdfBuffer.toString("base64");
-res.json({
-  filename: 'shotlist.pdf',
-  pdfBase64,                // keep this for now
-  pdfUrl: 'https://example.com/test.pdf' // temp HTTPS URL
-});
 
+    // ----------------------------------------------------
+    // Turn PDF buffer into both base64 and a temporary URL
+    // ----------------------------------------------------
+    const pdfBase64 = pdfBuffer.toString("base64");
 
+    // Unique-ish filename; could also use uuid() if you prefer
+    const filename = `shotlist-${Date.now()}.pdf`;
 
+    const filePath = path.join(pdfDir, filename);
+
+    // Write PDF file to local /pdfs folder
+    await fs.promises.writeFile(filePath, pdfBuffer);
+
+    // Public URL that Render will serve via the static middleware above
+    const pdfUrl = `https://glide-pdf-service.onrender.com/pdfs/${filename}`;
+
+    // Return JSON for Glide
+    res.json({
+      filename,
+      pdfBase64, // still available if you ever need it
+      pdfUrl,    // <- use this in Glide Open Link
+    });
   } catch (err) {
     console.error("PDF error:", err);
     res.status(500).json({ error: "PDF generation failed" });
