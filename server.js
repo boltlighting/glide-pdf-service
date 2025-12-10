@@ -53,8 +53,12 @@ function chooseGrid(imagesLeft) {
 // --------------------------------------------------------
 app.post("/generate", async (req, res) => {
   try {
-    let { title, description, images } = req.body || {};
+    // ✅ Read from body *or* query string (for Glide)
+    let title = req.body?.title ?? req.query.title;
+    let description = req.body?.description ?? req.query.description;
+    let images = req.body?.images ?? req.query.images;
 
+    // Support a single string (from query like ?images=URL)
     if (typeof images === "string") {
       images = images
         .split(",")
