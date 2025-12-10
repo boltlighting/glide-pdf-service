@@ -1,24 +1,10 @@
-import dotenv from "dotenv";
-dotenv.config();
 import express from "express";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuid } from "uuid";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
-
-// --- S3 CONFIG (to be set in Render later) ---
-const s3 = new S3Client({
-  region: process.env.S3_REGION,
-  endpoint: process.env.S3_ENDPOINT || undefined,
-  credentials: {
-    accessKeyId: process.env.S3_ACCESS_KEY,
-    secretAccessKey: process.env.S3_SECRET_KEY
-  },
-  forcePathStyle: !!process.env.S3_ENDPOINT
-});
 
 const BUCKET = process.env.S3_BUCKET;
 
@@ -143,10 +129,13 @@ app.post("/generate", async (req, res) => {
 
     doc.end();
     const pdfBuffer = await done;
-// Return PDF directly to the client (Glide)
-res.setHeader("Content-Type", "application/pdf");
-res.setHeader("Content-Disposition", "attachment; filename=generated.pdf");
-return res.send(pdfBuffer);
+// Return PDF as base64 inside JSON (for Glide)
+const pdfBase64 = pdfBuffer.toString("base64");
+return res.json({
+  filename: "shotlist.pdf",
+  pdfBase64,
+});
+
 
   } catch (err) {
     console.error("PDF error:", err);
