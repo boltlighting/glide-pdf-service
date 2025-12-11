@@ -23,7 +23,7 @@ const __dirname = path.dirname(__filename);
 // --------------------------------------------------------
 // Serve PDFs from /pdfs over HTTPS
 // --------------------------------------------------------
-const pdfDir = path.join(__dirname, "pdfs");
+const pdfDir = path.join("/tmp", "pdfs");
 fs.mkdirSync(pdfDir, { recursive: true });
 app.use("/pdfs", express.static(pdfDir));
 
