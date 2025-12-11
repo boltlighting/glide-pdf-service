@@ -1,3 +1,5 @@
+console.log("PDF SERVER VERSION 3", new Date().toISOString());
+
 import express from "express";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
