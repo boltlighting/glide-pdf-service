@@ -7,11 +7,8 @@ import { fileURLToPath } from "url";
 
 const app = express();
 
-// Glide sends query-string params; body is usually empty.
-// Keep JSON parser but small limit so we don't hit size issues.
 app.use(express.json({ limit: "1mb" }));
 
-// Node 18+ global fetch
 const fetchFn = globalThis.fetch;
 
 // --------------------------------------------------------
@@ -22,10 +19,11 @@ const __dirname = path.dirname(__filename);
 
 // --------------------------------------------------------
 // Optional Gill Sans font for scene headers
-// Put fonts/GillSans.otf next to this file if you want it.
+// Make sure fonts/GillSans.otf is committed to the repo.
 // --------------------------------------------------------
 const GILL_SANS_PATH = path.join(__dirname, "fonts", "GillSans.otf");
 const hasGillSans = fs.existsSync(GILL_SANS_PATH);
+console.log("Gill Sans present:", hasGillSans, "at", GILL_SANS_PATH);
 
 // --------------------------------------------------------
 // Serve PDFs from /tmp/pdfs over HTTPS (Render-safe)
@@ -37,8 +35,6 @@ app.use("/pdfs", express.static(pdfDir));
 // --------------------------------------------------------
 // Helpers
 // --------------------------------------------------------
-
-// Split a joined list like "a|||b|||c" into ["a","b","c"]
 function splitList(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
@@ -48,7 +44,6 @@ function splitList(value) {
     .filter(Boolean);
 }
 
-// Safely get the minimum length across all arrays
 function minLength(arrays) {
   return arrays.reduce(
     (min, arr) =>
@@ -64,7 +59,6 @@ app.post("/generate", async (req, res) => {
   try {
     console.log("Incoming query:", req.query);
 
-    // Glide is sending these as query string parameters
     const imagesRaw = req.query.images ?? req.body.images;
     const scenesRaw = req.query.scene ?? req.body.scene;
     const sizesRaw = req.query.size ?? req.body.size;
@@ -75,7 +69,7 @@ app.post("/generate", async (req, res) => {
     const scenes = splitList(scenesRaw);
     const sizes = splitList(sizesRaw);
     const descriptions = splitList(descRaw);
-    const names = splitList(namesRaw); // may be empty or shorter
+    const names = splitList(namesRaw);
 
     const usableCount = minLength([
       images,
@@ -105,7 +99,6 @@ app.post("/generate", async (req, res) => {
       });
     }
 
-    // Build a clean shots array
     const shots = [];
     for (let i = 0; i < usableCount; i++) {
       shots.push({
@@ -136,95 +129,99 @@ app.post("/generate", async (req, res) => {
       doc.on("error", reject);
     });
 
-    // ----------------------------------------------------
-    // Layout: 2 columns x 4 rows.
-    // Scenes share pages. Each new scene:
-    //   - gets a header row with underline
-    //   - does NOT force a new page
-    // ----------------------------------------------------
-    const COLS = 2;
-    const ROWS = 4;
-    const PER_PAGE = COLS * ROWS;
+    // Layout constants (tuned for 2x~4 rows per page)
+    const IMAGE_HEIGHT = 130;       // height for the image box
+    const TEXT_BLOCK_HEIGHT = 60;   // enough for size + name + description
+    const ROW_SPACING = 16;         // gap between rows
+    const ROW_HEIGHT =
+      IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
 
-    let slotIndexOnPage = PER_PAGE; // force first ensurePage() to add a page
-    let currentScene = null;
+    const HEADER_HEIGHT = 30;       // visual space used by header + line
 
-    function ensurePage() {
-      if (!doc.page || slotIndexOnPage >= PER_PAGE) {
-        doc.addPage();
-        slotIndexOnPage = 0;
-      }
-
-      const usableWidth =
-        doc.page.width -
-        doc.page.margins.left -
-        doc.page.margins.right;
-      const usableHeight =
-        doc.page.height -
-        doc.page.margins.top -
-        doc.page.margins.bottom;
-
-      const cellWidth = usableWidth / COLS;
-      const cellHeight = usableHeight / ROWS;
-
-      return { usableWidth, usableHeight, cellWidth, cellHeight };
+    function startNewPage() {
+      doc.addPage();
+      return {
+        currentY: doc.page.margins.top,
+        column: 0, // 0 = left, 1 = right
+      };
     }
 
-    // Main loop through all shots, scene by scene, but
-    // without forcing page breaks between scenes.
-    for (let index = 0; index < shots.length; index++) {
-      const shot = shots[index] ?? {};
+    function drawSceneHeader(sceneName, state) {
+      const pageWidth = doc.page.width;
+      const margins = doc.page.margins;
+      const usableWidth =
+        pageWidth - margins.left - margins.right;
+
+      doc
+        .font(hasGillSans ? GILL_SANS_PATH : "Helvetica-Bold")
+        .fontSize(18)
+        .text(sceneName || "Scene", margins.left, state.currentY, {
+          width: usableWidth,
+          align: "left",
+        });
+
+      const lineY = state.currentY + 22;
+      doc
+        .moveTo(margins.left, lineY)
+        .lineTo(pageWidth - margins.right, lineY)
+        .lineWidth(0.5)
+        .stroke();
+
+      state.currentY += HEADER_HEIGHT;
+      state.column = 0; // start a fresh row after a header
+    }
+
+    function repeatHeaderIfNeeded(sceneName, state) {
+      if (!sceneName) return;
+      drawSceneHeader(sceneName, state);
+    }
+
+    // Start first page
+    let state = startNewPage();
+    const bottomLimit =
+      () => doc.page.height - doc.page.margins.bottom;
+
+    let currentScene = null;
+
+    for (let i = 0; i < shots.length; i++) {
+      const shot = shots[i] ?? {};
       const sceneName = shot.scene || "";
 
-      // ---------- Scene header when scene changes ----------
-      if (index === 0 || sceneName !== currentScene) {
-        currentScene = sceneName;
+      const isNewScene = sceneName !== currentScene;
+      currentScene = sceneName;
 
-        // If we're mid-row, bump to the start of the next row
-        if (slotIndexOnPage % COLS !== 0 && slotIndexOnPage < PER_PAGE) {
-          slotIndexOnPage += COLS - (slotIndexOnPage % COLS);
+      // Scene header when the scene changes
+      if (isNewScene) {
+        // if not enough room for header + at least one row, new page
+        if (
+          state.currentY + HEADER_HEIGHT + ROW_HEIGHT >
+          bottomLimit()
+        ) {
+          state = startNewPage();
         }
-
-        const { usableWidth, cellHeight } = ensurePage();
-
-        const headerRow = Math.floor(slotIndexOnPage / COLS);
-        const headerX = doc.page.margins.left;
-        const headerY = doc.page.margins.top + headerRow * cellHeight;
-
-        // Header font: Gill Sans if present, else Helvetica-Bold
-        doc
-          .font(hasGillSans ? GILL_SANS_PATH : "Helvetica-Bold")
-          .fontSize(18)
-          .text(sceneName || "Scene", headerX, headerY, {
-            width: usableWidth,
-            align: "left",
-          });
-
-        // Horizontal line under header
-        const lineY = headerY + 22; // tweak if needed
-        doc
-          .moveTo(doc.page.margins.left, lineY)
-          .lineTo(
-            doc.page.width - doc.page.margins.right,
-            lineY
-          )
-          .lineWidth(0.5)
-          .stroke();
-
-        // Header consumes one whole row
-        slotIndexOnPage += COLS;
+        drawSceneHeader(sceneName, state);
       }
 
-      // ---------- Draw the shot in the next grid slot ----------
-      const { cellWidth, cellHeight } = ensurePage();
+      const margins = doc.page.margins;
+      const pageWidth = doc.page.width;
+      const usableWidth =
+        pageWidth - margins.left - margins.right;
+      const cellWidth = usableWidth / 2;
 
-      const row = Math.floor(slotIndexOnPage / COLS);
-      const col = slotIndexOnPage % COLS;
+      // If starting a new row on this page, check for overflow
+      if (state.column === 0) {
+        if (state.currentY + ROW_HEIGHT > bottomLimit()) {
+          // new page, repeat header for current scene
+          state = startNewPage();
+          repeatHeaderIfNeeded(sceneName, state);
+        }
+      }
 
-      const x = doc.page.margins.left + col * cellWidth;
-      const y = doc.page.margins.top + row * cellHeight;
+      const x =
+        margins.left + state.column * cellWidth;
+      const y = state.currentY;
 
-      const imageHeight = cellHeight * 0.55; // 55% image, 45% text
+      const imageHeight = IMAGE_HEIGHT;
       const textX = x;
       const textWidth = cellWidth - 6;
       const textTop = y + imageHeight + 4;
@@ -269,7 +266,7 @@ app.post("/generate", async (req, res) => {
           width: textWidth,
         });
 
-      // --- name (next line, small) ---
+      // --- name ---
       doc
         .font("Helvetica")
         .fontSize(9)
@@ -277,7 +274,7 @@ app.post("/generate", async (req, res) => {
           width: textWidth,
         });
 
-      // --- description (below, wrapped) ---
+      // --- description ---
       doc
         .font("Helvetica")
         .fontSize(8)
@@ -285,7 +282,13 @@ app.post("/generate", async (req, res) => {
           width: textWidth,
         });
 
-      slotIndexOnPage++;
+      // advance column / row
+      if (state.column === 0) {
+        state.column = 1; // move to right column, same row
+      } else {
+        state.column = 0;
+        state.currentY += ROW_HEIGHT; // move to next row
+      }
     }
 
     // Finish PDF
@@ -300,10 +303,7 @@ app.post("/generate", async (req, res) => {
 
     const pdfUrl = `https://glide-pdf-service.onrender.com/pdfs/${filename}`;
 
-    res.json({
-      filename,
-      pdfUrl,
-    });
+    res.json({ filename, pdfUrl });
   } catch (err) {
     console.error("PDF error:", err);
     res.status(500).json({
