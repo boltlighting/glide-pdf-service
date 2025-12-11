@@ -6,7 +6,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const app = express();
-app.use(express.json({ limit: "1mb" })); // body not heavily used now
+app.use(express.json({ limit: "1mb" }));
 
 // Node 18+ fetch
 const fetchFn = globalThis.fetch;
@@ -28,8 +28,6 @@ app.use("/pdfs", express.static(pdfDir));
 // Constants
 // --------------------------------------------------------
 const JOIN_SEP = "|||";
-
-// Fixed 2x4 grid: 2 columns x 4 rows = 8 images per page
 const GRID_COLS = 2;
 const GRID_ROWS = 4;
 const SHOTS_PER_PAGE = GRID_COLS * GRID_ROWS;
@@ -37,8 +35,6 @@ const SHOTS_PER_PAGE = GRID_COLS * GRID_ROWS;
 // --------------------------------------------------------
 // Helpers
 // --------------------------------------------------------
-
-// Split a joined-list field (string) into an array using JOIN_SEP
 function splitField(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val;
@@ -47,7 +43,6 @@ function splitField(val) {
     .map((s) => s.trim());
 }
 
-// Group shots by scene while preserving order
 function groupByScene(shots) {
   const groups = [];
   let currentScene = null;
@@ -56,16 +51,19 @@ function groupByScene(shots) {
   for (const shot of shots) {
     const scene = shot.scene || "";
     if (scene !== currentScene) {
-      // start a new group
-      if (currentGroup.length > 0) groups.push({ scene: currentScene, shots: currentGroup });
+      if (currentGroup.length > 0) {
+        groups.push({ scene: currentScene, shots: currentGroup });
+      }
       currentScene = scene;
       currentGroup = [];
     }
     currentGroup.push(shot);
   }
+
   if (currentGroup.length > 0) {
     groups.push({ scene: currentScene, shots: currentGroup });
   }
+
   return groups;
 }
 
@@ -74,7 +72,7 @@ function groupByScene(shots) {
 // --------------------------------------------------------
 app.post("/generate", async (req, res) => {
   try {
-    // Read from body OR query (Glide is using query string)
+    // Read from body or query
     const title =
       req.body?.title ??
       req.query.title ??
@@ -99,7 +97,6 @@ app.post("/generate", async (req, res) => {
       return res.status(400).json({ error: "no images provided" });
     }
 
-    // Build an array of shot objects aligned by index
     const shots = imageList.map((url, i) => ({
       url,
       size: sizeList[i] || "",
@@ -107,7 +104,6 @@ app.post("/generate", async (req, res) => {
       scene: sceneList[i] || "",
     }));
 
-    // Group shots by scene
     const sceneGroups = groupByScene(shots);
 
     // ----------------------------------------------------
@@ -120,88 +116,69 @@ app.post("/generate", async (req, res) => {
     });
 
     const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("data", (c) => chunks.push(c));
     const done = new Promise((resolve, reject) => {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
     });
 
-    // Optional intro page with global title/description
+    // Intro page
     doc.addPage();
     doc.fontSize(22).text(title, { align: "center" });
     doc.moveDown();
     if (description) {
-      doc.fontSize(12).text(description, {
-        align: "center",
-      });
+      doc.fontSize(12).text(description, { align: "center" });
     }
 
     // ----------------------------------------------------
-    // Scene pages with 2x4 grid
+    // Scene pages (2x4 grid)
     // ----------------------------------------------------
     for (const group of sceneGroups) {
       const sceneLabel = group.scene || "";
-
       const shotsInScene = group.shots;
-      let pageIndex = 0;
 
       for (let i = 0; i < shotsInScene.length; i++) {
-        // New page every SHOTS_PER_PAGE or at first shot in scene
-        if (i % SHOTS_PER_PAGE === 0) {
+        const indexOnPage = i % SHOTS_PER_PAGE;
+
+        if (indexOnPage === 0) {
           doc.addPage();
 
-          // Scene header at top of each page for that scene
           if (sceneLabel) {
-            doc.fontSize(18).text(sceneLabel, {
-              align: "left",
-            });
+            doc.fontSize(18).text(sceneLabel, { align: "left" });
             doc.moveDown(0.5);
           }
-
-          // You can optionally repeat global title smaller here if you want
-          // doc.fontSize(10).text(title, { align: "right" });
-
-          pageIndex++;
         }
 
         const shot = shotsInScene[i];
-
-        // Layout calculations
         const page = doc.page;
         const margins = page.margins;
 
         const headerSpace = sceneLabel ? 30 : 0;
 
         const usableWidth = page.width - margins.left - margins.right;
-        const usableHeight = page.height - margins.top - margins.bottom - headerSpace;
+        const usableHeight =
+          page.height - margins.top - margins.bottom - headerSpace;
 
         const cellWidth = usableWidth / GRID_COLS;
         const cellHeight = usableHeight / GRID_ROWS;
 
-        const indexOnPage = i % SHOTS_PER_PAGE;
-        const cellRow = Math.floor(indexOnPage / GRID_COLS);
-        const cellCol = indexOnPage % GRID_COLS;
+        const row = Math.floor(indexOnPage / GRID_COLS);
+        const col = indexOnPage % GRID_COLS;
 
-        const x = margins.left + cellCol * cellWidth;
-        const y = margins.top + headerSpace + cellRow * cellHeight;
+        const x = margins.left + col * cellWidth;
+        const y = margins.top + headerSpace + row * cellHeight;
 
-        // Reserve some vertical space at bottom of cell for caption
-        const imageBoxHeight = cellHeight - 30; // 30 px for caption
+        const imageBoxHeight = cellHeight - 30; // 30px for caption
 
-        // Build caption from size + description (no scene)
         const sizeText = (shot.size || "").trim();
         const descText = (shot.desc || "").trim();
-        const captionParts = [];
-        if (sizeText) captionParts.push(sizeText);
-        if (descText) captionParts.push(descText);
-        const caption = captionParts.join(" – ");
 
-        // Fetch and draw image
+        const caption = [sizeText, descText].filter(Boolean).join(" – ");
+
         try {
           const resp = await fetchFn(shot.url);
           if (resp.ok) {
             const buf = Buffer.from(await resp.arrayBuffer());
-
             const resized = await sharp(buf)
               .resize({ width: 1200, withoutEnlargement: true })
               .jpeg({ quality: 80 })
@@ -212,14 +189,11 @@ app.post("/generate", async (req, res) => {
               align: "center",
               valign: "center",
             });
-          } else {
-            console.error("Image fetch failed:", shot.url, resp.status);
           }
         } catch (e) {
-          console.error("Image failed:", shot.url, e);
+          console.error("Image load failed:", shot.url, e);
         }
 
-        // Caption
         if (caption) {
           doc.fontSize(8).text(caption, x + 5, y + imageBoxHeight, {
             width: cellWidth - 10,
@@ -233,19 +207,17 @@ app.post("/generate", async (req, res) => {
     const pdfBuffer = await done;
 
     // ----------------------------------------------------
-    // Save PDF and return URL + base64
+    // Save & Respond
     // ----------------------------------------------------
     const filename = `shotlist-${Date.now()}.pdf`;
     const filePath = path.join(pdfDir, filename);
     await fs.promises.writeFile(filePath, pdfBuffer);
 
     const pdfUrl = `https://glide-pdf-service.onrender.com/pdfs/${filename}`;
-    const pdfBase64 = pdfBuffer.toString("base64");
 
     res.json({
       filename,
       pdfUrl,
-      pdfBase64,
     });
   } catch (err) {
     console.error("PDF error:", err);
