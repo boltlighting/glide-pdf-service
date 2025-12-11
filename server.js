@@ -55,7 +55,6 @@ function minLength(arrays) {
 // --------------------------------------------------------
 app.post("/generate", async (req, res) => {
   try {
-    // For debugging: log raw query keys (won't leak in Glide)
     console.log("Incoming query:", req.query);
 
     // Glide is sending these as query string parameters
@@ -99,15 +98,15 @@ app.post("/generate", async (req, res) => {
       });
     }
 
-    // Trim all arrays to same usable length
+    // Build a clean shots array
     const shots = [];
     for (let i = 0; i < usableCount; i++) {
       shots.push({
-        image: images[i],
-        scene: scenes[i],
-        size: sizes[i],
-        description: descriptions[i],
-        name: names[i] || `Shot ${i + 1}`,
+        image: images[i] || "",
+        scene: scenes[i] || "",
+        size: sizes[i] || "",
+        description: descriptions[i] || "",
+        name: (names[i] || "").trim() || `Shot ${i + 1}`,
       });
     }
 
@@ -137,11 +136,15 @@ app.post("/generate", async (req, res) => {
 
     let i = 0;
     while (i < shots.length) {
-      const sceneName = (shots[i] && shots[i].scene) || "";
+      const firstShot = shots[i] ?? {};
+      const sceneName = firstShot.scene || "";
 
       // collect contiguous shots for this scene
       const sceneShots = [];
-      while (i < shots.length && shots[i] && shots[i].scene === sceneName) {
+      while (
+        i < shots.length &&
+        (shots[i]?.scene || "") === sceneName
+      ) {
         sceneShots.push(shots[i]);
         i++;
       }
@@ -184,13 +187,21 @@ app.post("/generate", async (req, res) => {
 
         // Draw each shot for this page
         for (let idx = 0; idx < pageShots.length; idx++) {
-          const shot = pageShots[idx];
+          // Always coerce to an object so properties are safe
+          const rawShot = pageShots[idx] ?? {};
+          const {
+            image = "",
+            size = "",
+            description = "",
+            name = "",
+          } = rawShot;
 
-          // SAFETY CHECK — prevents crashes like "Cannot read properties of undefined"
-          if (!shot) {
+          // Skip completely empty entries instead of crashing
+          if (!image && !size && !description && !name) {
             console.warn(
-              "Undefined shot in pageShots at index:",
+              "Empty or undefined shot at page index",
               idx,
+              "pageShots:",
               pageShots
             );
             continue;
@@ -209,8 +220,8 @@ app.post("/generate", async (req, res) => {
 
           // --- image ---
           try {
-            if (shot.image) {
-              const resp = await fetchFn(shot.image);
+            if (image) {
+              const resp = await fetchFn(image);
               if (resp.ok) {
                 const buf = Buffer.from(await resp.arrayBuffer());
                 const resized = await sharp(buf)
@@ -229,20 +240,20 @@ app.post("/generate", async (req, res) => {
               } else {
                 console.warn(
                   "Image fetch not OK:",
-                  shot.image,
+                  image,
                   resp.status
                 );
               }
             }
           } catch (e) {
-            console.error("Image failed:", shot.image, e);
+            console.error("Image failed:", image, e);
           }
 
           // --- size (bold, small) ---
           doc
             .font("Helvetica-Bold")
             .fontSize(9)
-            .text(shot.size || "", textX, textTop, {
+            .text(size || "", textX, textTop, {
               width: textWidth,
             });
 
@@ -250,7 +261,7 @@ app.post("/generate", async (req, res) => {
           doc
             .font("Helvetica")
             .fontSize(9)
-            .text(shot.name || "", {
+            .text(name || "", {
               width: textWidth,
             });
 
@@ -258,7 +269,7 @@ app.post("/generate", async (req, res) => {
           doc
             .font("Helvetica")
             .fontSize(8)
-            .text(shot.description || "", {
+            .text(description || "", {
               width: textWidth,
             });
         }
