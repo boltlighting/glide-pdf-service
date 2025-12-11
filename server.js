@@ -193,14 +193,24 @@ app.post("/generate", async (req, res) => {
       // Scene header when the scene changes
       if (isNewScene) {
         // if not enough room for header + at least one row, new page
-        if (
-          state.currentY + HEADER_HEIGHT + ROW_HEIGHT >
-          bottomLimit()
-        ) {
-          state = startNewPage();
-        }
-        drawSceneHeader(sceneName, state);
-      }
+        if (isNewScene) {
+  // If we're in the right column, finish this row first
+  if (state.column === 1) {
+    state.column = 0;
+    state.currentY += ROW_HEIGHT;
+  }
+
+  // If not enough room for header + at least one row, start a new page
+  if (
+    state.currentY + HEADER_HEIGHT + ROW_HEIGHT >
+    bottomLimit()
+  ) {
+    state = startNewPage();
+  }
+
+  drawSceneHeader(sceneName, state);
+}
+
 
       const margins = doc.page.margins;
       const pageWidth = doc.page.width;
