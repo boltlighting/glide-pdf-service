@@ -1,5 +1,3 @@
-console.log("PDF SERVER VERSION 4", new Date().toISOString());
-
 import express from "express";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
@@ -21,6 +19,13 @@ const fetchFn = globalThis.fetch;
 // --------------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// --------------------------------------------------------
+// Optional Gill Sans font for scene headers
+// Put fonts/GillSans.otf next to this file if you want it.
+// --------------------------------------------------------
+const GILL_SANS_PATH = path.join(__dirname, "fonts", "GillSans.otf");
+const hasGillSans = fs.existsSync(GILL_SANS_PATH);
 
 // --------------------------------------------------------
 // Serve PDFs from /tmp/pdfs over HTTPS (Render-safe)
@@ -131,153 +136,159 @@ app.post("/generate", async (req, res) => {
       doc.on("error", reject);
     });
 
-    // Layout constants: 2 columns x 4 rows = 8 images per page
+    // ----------------------------------------------------
+    // Layout: 2 columns x 4 rows.
+    // Scenes share pages. Each new scene:
+    //   - gets a header row with underline
+    //   - does NOT force a new page
+    // ----------------------------------------------------
     const COLS = 2;
     const ROWS = 4;
     const PER_PAGE = COLS * ROWS;
 
-    let i = 0;
-    while (i < shots.length) {
-      const firstShot = shots[i] ?? {};
-      const sceneName = firstShot.scene || "";
+    let slotIndexOnPage = PER_PAGE; // force first ensurePage() to add a page
+    let currentScene = null;
 
-      // collect contiguous shots for this scene
-      const sceneShots = [];
-      while (
-        i < shots.length &&
-        (shots[i]?.scene || "") === sceneName
-      ) {
-        sceneShots.push(shots[i]);
-        i++;
-      }
-
-      console.log(`Scene "${sceneName}" has ${sceneShots.length} shots`);
-
-      // paginate this scene’s shots, 8 per page
-      let offset = 0;
-      while (offset < sceneShots.length) {
-        const pageShots = sceneShots.slice(offset, offset + PER_PAGE);
-        offset += PER_PAGE;
-
+    function ensurePage() {
+      if (!doc.page || slotIndexOnPage >= PER_PAGE) {
         doc.addPage();
-
-        // Scene header at top of every page for this scene
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(18)
-          .text(sceneName || "Scene", { align: "left" });
-        doc.moveDown(0.5);
-
-        const headerBottomY = doc.y;
-
-        const usableWidth =
-          doc.page.width -
-          doc.page.margins.left -
-          doc.page.margins.right;
-        const usableHeight =
-          doc.page.height -
-          headerBottomY -
-          doc.page.margins.bottom;
-
-        const cellWidth = usableWidth / COLS;
-        const cellHeight = usableHeight / ROWS;
-
-        if (cellWidth <= 0 || cellHeight <= 0) {
-          console.warn("Invalid cell size", cellWidth, cellHeight);
-          continue;
-        }
-
-        // Draw each shot for this page
-        for (let idx = 0; idx < pageShots.length; idx++) {
-          // Always coerce to an object so properties are safe
-          const rawShot = pageShots[idx] ?? {};
-          const {
-            image = "",
-            size = "",
-            description = "",
-            name = "",
-          } = rawShot;
-
-          // Skip completely empty entries instead of crashing
-          if (!image && !size && !description && !name) {
-            console.warn(
-              "Empty or undefined shot at page index",
-              idx,
-              "pageShots:",
-              pageShots
-            );
-            continue;
-          }
-
-          const row = Math.floor(idx / COLS);
-          const col = idx % COLS;
-
-          const x = doc.page.margins.left + col * cellWidth;
-          const y = headerBottomY + row * cellHeight;
-
-          const imageHeight = cellHeight * 0.55; // 55% image, 45% text
-          const textX = x;
-          const textWidth = cellWidth - 6;
-          const textTop = y + imageHeight + 4;
-
-          // --- image ---
-          try {
-            if (image) {
-              const resp = await fetchFn(image);
-              if (resp.ok) {
-                const buf = Buffer.from(await resp.arrayBuffer());
-                const resized = await sharp(buf)
-                  .resize({
-                    width: 1200,
-                    withoutEnlargement: true,
-                  })
-                  .jpeg({ quality: 80 })
-                  .toBuffer();
-
-                doc.image(resized, x, y, {
-                  fit: [cellWidth - 6, imageHeight],
-                  align: "center",
-                  valign: "center",
-                });
-              } else {
-                console.warn(
-                  "Image fetch not OK:",
-                  image,
-                  resp.status
-                );
-              }
-            }
-          } catch (e) {
-            console.error("Image failed:", image, e);
-          }
-
-          // --- size (bold, small) ---
-          doc
-            .font("Helvetica-Bold")
-            .fontSize(9)
-            .text(size || "", textX, textTop, {
-              width: textWidth,
-            });
-
-          // --- name (next line, small) ---
-          doc
-            .font("Helvetica")
-            .fontSize(9)
-            .text(name || "", {
-              width: textWidth,
-            });
-
-          // --- description (below, wrapped) ---
-          doc
-            .font("Helvetica")
-            .fontSize(8)
-            .text(description || "", {
-              width: textWidth,
-            });
-        }
+        slotIndexOnPage = 0;
       }
+
+      const usableWidth =
+        doc.page.width -
+        doc.page.margins.left -
+        doc.page.margins.right;
+      const usableHeight =
+        doc.page.height -
+        doc.page.margins.top -
+        doc.page.margins.bottom;
+
+      const cellWidth = usableWidth / COLS;
+      const cellHeight = usableHeight / ROWS;
+
+      return { usableWidth, usableHeight, cellWidth, cellHeight };
     }
 
+    // Main loop through all shots, scene by scene, but
+    // without forcing page breaks between scenes.
+    for (let index = 0; index < shots.length; index++) {
+      const shot = shots[index] ?? {};
+      const sceneName = shot.scene || "";
+
+      // ---------- Scene header when scene changes ----------
+      if (index === 0 || sceneName !== currentScene) {
+        currentScene = sceneName;
+
+        // If we're mid-row, bump to the start of the next row
+        if (slotIndexOnPage % COLS !== 0 && slotIndexOnPage < PER_PAGE) {
+          slotIndexOnPage += COLS - (slotIndexOnPage % COLS);
+        }
+
+        const { usableWidth, cellHeight } = ensurePage();
+
+        const headerRow = Math.floor(slotIndexOnPage / COLS);
+        const headerX = doc.page.margins.left;
+        const headerY = doc.page.margins.top + headerRow * cellHeight;
+
+        // Header font: Gill Sans if present, else Helvetica-Bold
+        doc
+          .font(hasGillSans ? GILL_SANS_PATH : "Helvetica-Bold")
+          .fontSize(18)
+          .text(sceneName || "Scene", headerX, headerY, {
+            width: usableWidth,
+            align: "left",
+          });
+
+        // Horizontal line under header
+        const lineY = headerY + 22; // tweak if needed
+        doc
+          .moveTo(doc.page.margins.left, lineY)
+          .lineTo(
+            doc.page.width - doc.page.margins.right,
+            lineY
+          )
+          .lineWidth(0.5)
+          .stroke();
+
+        // Header consumes one whole row
+        slotIndexOnPage += COLS;
+      }
+
+      // ---------- Draw the shot in the next grid slot ----------
+      const { cellWidth, cellHeight } = ensurePage();
+
+      const row = Math.floor(slotIndexOnPage / COLS);
+      const col = slotIndexOnPage % COLS;
+
+      const x = doc.page.margins.left + col * cellWidth;
+      const y = doc.page.margins.top + row * cellHeight;
+
+      const imageHeight = cellHeight * 0.55; // 55% image, 45% text
+      const textX = x;
+      const textWidth = cellWidth - 6;
+      const textTop = y + imageHeight + 4;
+
+      const imageUrl = shot.image || "";
+      const sizeLabel = shot.size || "";
+      const shotName = shot.name || "";
+      const description = shot.description || "";
+
+      // --- image ---
+      try {
+        if (imageUrl) {
+          const resp = await fetchFn(imageUrl);
+          if (resp.ok) {
+            const buf = Buffer.from(await resp.arrayBuffer());
+            const resized = await sharp(buf)
+              .resize({
+                width: 1200,
+                withoutEnlargement: true,
+              })
+              .jpeg({ quality: 80 })
+              .toBuffer();
+
+            doc.image(resized, x, y, {
+              fit: [cellWidth - 6, imageHeight],
+              align: "center",
+              valign: "center",
+            });
+          } else {
+            console.warn("Image fetch not OK:", imageUrl, resp.status);
+          }
+        }
+      } catch (e) {
+        console.error("Image failed:", imageUrl, e);
+      }
+
+      // --- size (bold, small) ---
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .text(sizeLabel, textX, textTop, {
+          width: textWidth,
+        });
+
+      // --- name (next line, small) ---
+      doc
+        .font("Helvetica")
+        .fontSize(9)
+        .text(shotName, {
+          width: textWidth,
+        });
+
+      // --- description (below, wrapped) ---
+      doc
+        .font("Helvetica")
+        .fontSize(8)
+        .text(description, {
+          width: textWidth,
+        });
+
+      slotIndexOnPage++;
+    }
+
+    // Finish PDF
     doc.end();
     const pdfBuffer = await done;
 
