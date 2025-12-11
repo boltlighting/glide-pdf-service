@@ -52,6 +52,25 @@ function minLength(arrays) {
   );
 }
 
+// Group contiguous shots by scene name
+function groupByScene(shots) {
+  const groups = [];
+  let i = 0;
+  while (i < shots.length) {
+    const sceneName = shots[i].scene || "";
+    const groupShots = [];
+    while (
+      i < shots.length &&
+      (shots[i].scene || "") === sceneName
+    ) {
+      groupShots.push(shots[i]);
+      i++;
+    }
+    groups.push({ sceneName, shots: groupShots });
+  }
+  return groups;
+}
+
 // --------------------------------------------------------
 // Main endpoint
 // --------------------------------------------------------
@@ -112,6 +131,8 @@ app.post("/generate", async (req, res) => {
 
     console.log("Total shots:", shots.length);
 
+    const sceneGroups = groupByScene(shots);
+
     // ----------------------------------------------------
     // Create PDF
     // ----------------------------------------------------
@@ -130,173 +151,175 @@ app.post("/generate", async (req, res) => {
     });
 
     // ----------------------------------------------------
-    // Layout constants (2 columns, multiple rows)
+    // Layout: row-based, no overlap
     // ----------------------------------------------------
-    const IMAGE_HEIGHT = 130;        // height for the image
-    const TEXT_BLOCK_HEIGHT = 58;    // size + name + description
-    const ROW_SPACING = 12;          // gap between rows
-    const ROW_HEIGHT =
-      IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
+    const COLS = 2;
+    const IMAGE_HEIGHT = 135;
+    const TEXT_BLOCK_HEIGHT = 70; // size + name + description
+    const ROW_SPACING = 12;
 
-    const HEADER_HEIGHT = 30;        // vertical space used by header+line
+    function computeLayout() {
+      const page = doc.page;
+      const margins = page.margins;
+      const usableHeight =
+        page.height - margins.top - margins.bottom;
+      const rowHeight =
+        IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
+      const maxRows = Math.floor(usableHeight / rowHeight);
+      const usableWidth =
+        page.width - margins.left - margins.right;
+      return { rowHeight, maxRows, usableWidth };
+    }
 
     function startNewPage() {
       doc.addPage();
+      const layout = computeLayout();
       return {
-        currentY: doc.page.margins.top,
-        column: 0, // 0 = left, 1 = right
+        rowIndex: 0, // 0..maxRows-1
+        layout,
       };
     }
 
-    function drawSceneHeader(sceneName, state) {
-      const margins = doc.page.margins;
-      const pageWidth = doc.page.width;
-      const usableWidth =
-        pageWidth - margins.left - margins.right;
+    function ensureRows(state, neededRows) {
+      const { rowHeight, maxRows } = state.layout;
+      if (state.rowIndex + neededRows > maxRows) {
+        state = startNewPage();
+      }
+      return state;
+    }
+
+    function drawHeaderRow(sceneName, state) {
+      const { rowHeight, usableWidth } = state.layout;
+      const page = doc.page;
+      const margins = page.margins;
+
+      const y = margins.top + state.rowIndex * rowHeight;
 
       doc
         .font(hasGillSans ? GILL_SANS_PATH : "Helvetica-Bold")
         .fontSize(18)
-        .text(sceneName || "Scene", margins.left, state.currentY, {
+        .text(sceneName || "Scene", margins.left, y, {
           width: usableWidth,
           align: "left",
         });
 
-      const lineY = state.currentY + 22;
+      const lineY = y + 22;
       doc
         .moveTo(margins.left, lineY)
-        .lineTo(pageWidth - margins.right, lineY)
+        .lineTo(page.width - margins.right, lineY)
         .lineWidth(0.5)
         .stroke();
 
-      state.currentY += HEADER_HEIGHT;
-      state.column = 0; // header always resets to start of row
+      state.rowIndex += 1; // header consumes one full row
     }
 
-    function repeatHeaderIfNeeded(sceneName, state) {
-      if (!sceneName) return;
-      drawSceneHeader(sceneName, state);
-    }
+    function drawShotRow(sceneName, sceneShots, startIndex, state) {
+      let i = startIndex;
+      const { rowHeight, usableWidth } = state.layout;
+      const page = doc.page;
+      const margins = page.margins;
+      const cellWidth = usableWidth / COLS;
 
-    const bottomLimit = () =>
-      doc.page.height - doc.page.margins.bottom;
+      const y = margins.top + state.rowIndex * rowHeight;
+      const imageHeight = IMAGE_HEIGHT;
+
+      for (let col = 0; col < COLS && i < sceneShots.length; col++, i++) {
+        const shot = sceneShots[i] || {};
+        const x = margins.left + col * cellWidth;
+
+        const textX = x;
+        const textWidth = cellWidth - 6;
+        const textTop = y + imageHeight + 4;
+
+        const imageUrl = shot.image || "";
+        const sizeLabel = shot.size || "";
+        const shotName = shot.name || "";
+        const description = shot.description || "";
+
+        // --- image ---
+        try {
+          if (imageUrl) {
+            const resp = await fetchFn(imageUrl);
+            if (resp.ok) {
+              const buf = Buffer.from(await resp.arrayBuffer());
+              const resized = await sharp(buf)
+                .resize({
+                  width: 1200,
+                  withoutEnlargement: true,
+                })
+                .jpeg({ quality: 80 })
+                .toBuffer();
+
+              doc.image(resized, x, y, {
+                fit: [cellWidth - 6, imageHeight],
+                align: "center",
+                valign: "center",
+              });
+            } else {
+              console.warn("Image fetch not OK:", imageUrl, resp.status);
+            }
+          }
+        } catch (e) {
+          console.error("Image failed:", imageUrl, e);
+        }
+
+        // --- size ---
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text(sizeLabel, textX, textTop, {
+            width: textWidth,
+          });
+
+        // --- name ---
+        doc
+          .font("Helvetica")
+          .fontSize(9)
+          .text(shotName, {
+            width: textWidth,
+          });
+
+        // --- description ---
+        doc
+          .font("Helvetica")
+          .fontSize(8)
+          .text(description, {
+            width: textWidth,
+          });
+      }
+
+      state.rowIndex += 1; // one full row of shots
+      return i; // next shot index
+    }
 
     // Start first page
     let state = startNewPage();
-    let currentScene = null;
 
-    for (let i = 0; i < shots.length; i++) {
-      const shot = shots[i] ?? {};
-      const sceneName = shot.scene || "";
+    for (const group of sceneGroups) {
+      const sceneName = group.sceneName;
+      const sceneShots = group.shots;
+      let shotIndex = 0;
 
-      const isNewScene = sceneName !== currentScene;
-      currentScene = sceneName;
+      // Need at least 1 row for header + 1 row for shots
+      state = ensureRows(state, 2);
+      drawHeaderRow(sceneName, state);
 
-      // -------- Scene header when the scene changes --------
-      if (isNewScene) {
-        // If we're currently in the right column, finish that row
-        if (state.column === 1) {
-          state.column = 0;
-          state.currentY += ROW_HEIGHT;
+      while (shotIndex < sceneShots.length) {
+        // If we ran out of rows, new page + repeat header
+        state = ensureRows(state, 1);
+        if (state.rowIndex === 0 && shotIndex > 0) {
+          // just started a new page while still in this scene
+          state = ensureRows(state, 2);
+          drawHeaderRow(sceneName, state);
         }
 
-        // If not enough room for header + at least one row, new page
-        if (
-          state.currentY + HEADER_HEIGHT + ROW_HEIGHT >
-          bottomLimit()
-        ) {
-          state = startNewPage();
-        }
-
-        drawSceneHeader(sceneName, state);
-      }
-
-      const margins = doc.page.margins;
-      const pageWidth = doc.page.width;
-      const usableWidth =
-        pageWidth - margins.left - margins.right;
-      const cellWidth = usableWidth / 2;
-
-      // If starting a new row, check for overflow
-      if (state.column === 0) {
-        if (state.currentY + ROW_HEIGHT > bottomLimit()) {
-          // New page, repeat header for current scene
-          state = startNewPage();
-          repeatHeaderIfNeeded(sceneName, state);
-        }
-      }
-
-      const x =
-        margins.left + state.column * cellWidth;
-      const y = state.currentY;
-
-      const imageHeight = IMAGE_HEIGHT;
-      const textX = x;
-      const textWidth = cellWidth - 6;
-      const textTop = y + imageHeight + 4;
-
-      const imageUrl = shot.image || "";
-      const sizeLabel = shot.size || "";
-      const shotName = shot.name || "";
-      const description = shot.description || "";
-
-      // --- image ---
-      try {
-        if (imageUrl) {
-          const resp = await fetchFn(imageUrl);
-          if (resp.ok) {
-            const buf = Buffer.from(await resp.arrayBuffer());
-            const resized = await sharp(buf)
-              .resize({
-                width: 1200,
-                withoutEnlargement: true,
-              })
-              .jpeg({ quality: 80 })
-              .toBuffer();
-
-            doc.image(resized, x, y, {
-              fit: [cellWidth - 6, imageHeight],
-              align: "center",
-              valign: "center",
-            });
-          } else {
-            console.warn("Image fetch not OK:", imageUrl, resp.status);
-          }
-        }
-      } catch (e) {
-        console.error("Image failed:", imageUrl, e);
-      }
-
-      // --- size (bold, small) ---
-      doc
-        .font("Helvetica-Bold")
-        .fontSize(9)
-        .text(sizeLabel, textX, textTop, {
-          width: textWidth,
-        });
-
-      // --- name ---
-      doc
-        .font("Helvetica")
-        .fontSize(9)
-        .text(shotName, {
-          width: textWidth,
-        });
-
-      // --- description ---
-      doc
-        .font("Helvetica")
-        .fontSize(8)
-        .text(description, {
-          width: textWidth,
-        });
-
-      // Advance column/row
-      if (state.column === 0) {
-        state.column = 1; // move to right column
-      } else {
-        state.column = 0;
-        state.currentY += ROW_HEIGHT; // next row
+        // Draw one row of up to 2 shots
+        shotIndex = await drawShotRow(
+          sceneName,
+          sceneShots,
+          shotIndex,
+          state
+        );
       }
     }
 
