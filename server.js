@@ -19,7 +19,7 @@ const __dirname = path.dirname(__filename);
 
 // --------------------------------------------------------
 // Optional Gill Sans font for scene headers
-// Make sure fonts/GillSans.otf is committed to the repo.
+// Commit fonts/GillSans.otf into your repo.
 // --------------------------------------------------------
 const GILL_SANS_PATH = path.join(__dirname, "fonts", "GillSans.otf");
 const hasGillSans = fs.existsSync(GILL_SANS_PATH);
@@ -129,14 +129,16 @@ app.post("/generate", async (req, res) => {
       doc.on("error", reject);
     });
 
-    // Layout constants (tuned for 2x~4 rows per page)
-    const IMAGE_HEIGHT = 130;       // height for the image box
-    const TEXT_BLOCK_HEIGHT = 60;   // enough for size + name + description
-    const ROW_SPACING = 16;         // gap between rows
+    // ----------------------------------------------------
+    // Layout constants (2 columns, multiple rows)
+    // ----------------------------------------------------
+    const IMAGE_HEIGHT = 130;        // height for the image
+    const TEXT_BLOCK_HEIGHT = 58;    // size + name + description
+    const ROW_SPACING = 12;          // gap between rows
     const ROW_HEIGHT =
       IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
 
-    const HEADER_HEIGHT = 30;       // visual space used by header + line
+    const HEADER_HEIGHT = 30;        // vertical space used by header+line
 
     function startNewPage() {
       doc.addPage();
@@ -147,8 +149,8 @@ app.post("/generate", async (req, res) => {
     }
 
     function drawSceneHeader(sceneName, state) {
-      const pageWidth = doc.page.width;
       const margins = doc.page.margins;
+      const pageWidth = doc.page.width;
       const usableWidth =
         pageWidth - margins.left - margins.right;
 
@@ -168,7 +170,7 @@ app.post("/generate", async (req, res) => {
         .stroke();
 
       state.currentY += HEADER_HEIGHT;
-      state.column = 0; // start a fresh row after a header
+      state.column = 0; // header always resets to start of row
     }
 
     function repeatHeaderIfNeeded(sceneName, state) {
@@ -176,11 +178,11 @@ app.post("/generate", async (req, res) => {
       drawSceneHeader(sceneName, state);
     }
 
+    const bottomLimit = () =>
+      doc.page.height - doc.page.margins.bottom;
+
     // Start first page
     let state = startNewPage();
-    const bottomLimit =
-      () => doc.page.height - doc.page.margins.bottom;
-
     let currentScene = null;
 
     for (let i = 0; i < shots.length; i++) {
@@ -190,27 +192,24 @@ app.post("/generate", async (req, res) => {
       const isNewScene = sceneName !== currentScene;
       currentScene = sceneName;
 
-      // Scene header when the scene changes
+      // -------- Scene header when the scene changes --------
       if (isNewScene) {
-        // if not enough room for header + at least one row, new page
-        if (isNewScene) {
-  // If we're in the right column, finish this row first
-  if (state.column === 1) {
-    state.column = 0;
-    state.currentY += ROW_HEIGHT;
-  }
+        // If we're currently in the right column, finish that row
+        if (state.column === 1) {
+          state.column = 0;
+          state.currentY += ROW_HEIGHT;
+        }
 
-  // If not enough room for header + at least one row, start a new page
-  if (
-    state.currentY + HEADER_HEIGHT + ROW_HEIGHT >
-    bottomLimit()
-  ) {
-    state = startNewPage();
-  }
+        // If not enough room for header + at least one row, new page
+        if (
+          state.currentY + HEADER_HEIGHT + ROW_HEIGHT >
+          bottomLimit()
+        ) {
+          state = startNewPage();
+        }
 
-  drawSceneHeader(sceneName, state);
-}
-
+        drawSceneHeader(sceneName, state);
+      }
 
       const margins = doc.page.margins;
       const pageWidth = doc.page.width;
@@ -218,10 +217,10 @@ app.post("/generate", async (req, res) => {
         pageWidth - margins.left - margins.right;
       const cellWidth = usableWidth / 2;
 
-      // If starting a new row on this page, check for overflow
+      // If starting a new row, check for overflow
       if (state.column === 0) {
         if (state.currentY + ROW_HEIGHT > bottomLimit()) {
-          // new page, repeat header for current scene
+          // New page, repeat header for current scene
           state = startNewPage();
           repeatHeaderIfNeeded(sceneName, state);
         }
@@ -292,12 +291,12 @@ app.post("/generate", async (req, res) => {
           width: textWidth,
         });
 
-      // advance column / row
+      // Advance column/row
       if (state.column === 0) {
-        state.column = 1; // move to right column, same row
+        state.column = 1; // move to right column
       } else {
         state.column = 0;
-        state.currentY += ROW_HEIGHT; // move to next row
+        state.currentY += ROW_HEIGHT; // next row
       }
     }
 
