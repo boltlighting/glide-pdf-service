@@ -6,9 +6,12 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const app = express();
+
+// We still accept JSON bodies if you ever use them,
+// but Glide is sending everything via query string.
 app.use(express.json({ limit: "1mb" }));
 
-// Node 18+ fetch
+// Node 18+ global fetch
 const fetchFn = globalThis.fetch;
 
 // --------------------------------------------------------
@@ -25,46 +28,25 @@ fs.mkdirSync(pdfDir, { recursive: true });
 app.use("/pdfs", express.static(pdfDir));
 
 // --------------------------------------------------------
-// Constants
-// --------------------------------------------------------
-const JOIN_SEP = "|||";
-const GRID_COLS = 2;
-const GRID_ROWS = 4;
-const SHOTS_PER_PAGE = GRID_COLS * GRID_ROWS;
-
-// --------------------------------------------------------
 // Helpers
 // --------------------------------------------------------
-function splitField(val) {
-  if (!val) return [];
-  if (Array.isArray(val)) return val;
-  return String(val)
-    .split(JOIN_SEP)
-    .map((s) => s.trim());
+
+// Split a joined list like "a|||b|||c" into ["a","b","c"]
+function splitList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  return String(value)
+    .split("|||")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-function groupByScene(shots) {
-  const groups = [];
-  let currentScene = null;
-  let currentGroup = [];
-
-  for (const shot of shots) {
-    const scene = shot.scene || "";
-    if (scene !== currentScene) {
-      if (currentGroup.length > 0) {
-        groups.push({ scene: currentScene, shots: currentGroup });
-      }
-      currentScene = scene;
-      currentGroup = [];
-    }
-    currentGroup.push(shot);
-  }
-
-  if (currentGroup.length > 0) {
-    groups.push({ scene: currentScene, shots: currentGroup });
-  }
-
-  return groups;
+// Safely get the minimum length across all arrays
+function minLength(arrays) {
+  return arrays.reduce(
+    (min, arr) => Math.min(min, Array.isArray(arr) ? arr.length : 0),
+    Infinity
+  );
 }
 
 // --------------------------------------------------------
@@ -72,39 +54,35 @@ function groupByScene(shots) {
 // --------------------------------------------------------
 app.post("/generate", async (req, res) => {
   try {
-    // Read from body or query
-    const title =
-      req.body?.title ??
-      req.query.title ??
-      "Shot List";
+    // Glide is sending these as query string parameters
+    const imagesRaw = req.query.images ?? req.body.images;
+    const scenesRaw = req.query.scene ?? req.body.scene;
+    const sizesRaw = req.query.size ?? req.body.size;
+    const descRaw = req.query.description ?? req.body.description;
+    const namesRaw = req.query.name ?? req.body.name; // optional "name" list
 
-    const description =
-      req.body?.description ??
-      req.query.description ??
-      "";
+    const images = splitList(imagesRaw);
+    const scenes = splitList(scenesRaw);
+    const sizes = splitList(sizesRaw);
+    const descriptions = splitList(descRaw);
+    const names = splitList(namesRaw); // may be shorter/empty
 
-    const imagesRaw = req.body?.images ?? req.query.images;
-    const sizesRaw = req.body?.sizes ?? req.query.sizes;
-    const descsRaw = req.body?.descriptions ?? req.query.descriptions;
-    const scenesRaw = req.body?.scenes ?? req.query.scenes;
-
-    const imageList = splitField(imagesRaw);
-    const sizeList = splitField(sizesRaw);
-    const descList = splitField(descsRaw);
-    const sceneList = splitField(scenesRaw);
-
-    if (!imageList.length) {
-      return res.status(400).json({ error: "no images provided" });
+    const usableCount = minLength([images, scenes, sizes, descriptions]);
+    if (!Number.isFinite(usableCount) || usableCount === 0) {
+      return res.status(400).json({ error: "no valid shots provided" });
     }
 
-    const shots = imageList.map((url, i) => ({
-      url,
-      size: sizeList[i] || "",
-      desc: descList[i] || "",
-      scene: sceneList[i] || "",
-    }));
-
-    const sceneGroups = groupByScene(shots);
+    // Trim all arrays to same usable length
+    const shots = [];
+    for (let i = 0; i < usableCount; i++) {
+      shots.push({
+        image: images[i],
+        scene: scenes[i],
+        size: sizes[i],
+        description: descriptions[i],
+        name: names[i] || `Shot ${i + 1}`, // fallback if no name passed
+      });
+    }
 
     // ----------------------------------------------------
     // Create PDF
@@ -117,88 +95,114 @@ app.post("/generate", async (req, res) => {
 
     const chunks = [];
     doc.on("data", (c) => chunks.push(c));
+
     const done = new Promise((resolve, reject) => {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
     });
 
-    // Intro page
-    doc.addPage();
-    doc.fontSize(22).text(title, { align: "center" });
-    doc.moveDown();
-    if (description) {
-      doc.fontSize(12).text(description, { align: "center" });
-    }
+    // Layout constants: 2 columns x 4 rows = 8 images per page
+    const COLS = 2;
+    const ROWS = 4;
+    const PER_PAGE = COLS * ROWS;
 
-    // ----------------------------------------------------
-    // Scene pages (2x4 grid)
-    // ----------------------------------------------------
-    for (const group of sceneGroups) {
-      const sceneLabel = group.scene || "";
-      const shotsInScene = group.shots;
+    // Group shots by scene (contiguous groups)
+    let i = 0;
+    while (i < shots.length) {
+      const sceneName = shots[i].scene || "";
 
-      for (let i = 0; i < shotsInScene.length; i++) {
-        const indexOnPage = i % SHOTS_PER_PAGE;
+      const sceneShots = [];
+      while (i < shots.length && shots[i].scene === sceneName) {
+        sceneShots.push(shots[i]);
+        i++;
+      }
 
-        if (indexOnPage === 0) {
-          doc.addPage();
+      // Now paginate this scene’s shots, 8 per page
+      let offset = 0;
+      while (offset < sceneShots.length) {
+        const pageShots = sceneShots.slice(offset, offset + PER_PAGE);
+        offset += PER_PAGE;
 
-          if (sceneLabel) {
-            doc.fontSize(18).text(sceneLabel, { align: "left" });
-            doc.moveDown(0.5);
-          }
-        }
+        doc.addPage();
 
-        const shot = shotsInScene[i];
-        const page = doc.page;
-        const margins = page.margins;
-
-        const headerSpace = sceneLabel ? 30 : 0;
-
-        const usableWidth = page.width - margins.left - margins.right;
-        const usableHeight =
-          page.height - margins.top - margins.bottom - headerSpace;
-
-        const cellWidth = usableWidth / GRID_COLS;
-        const cellHeight = usableHeight / GRID_ROWS;
-
-        const row = Math.floor(indexOnPage / GRID_COLS);
-        const col = indexOnPage % GRID_COLS;
-
-        const x = margins.left + col * cellWidth;
-        const y = margins.top + headerSpace + row * cellHeight;
-
-        const imageBoxHeight = cellHeight - 30; // 30px for caption
-
-        const sizeText = (shot.size || "").trim();
-        const descText = (shot.desc || "").trim();
-
-        const caption = [sizeText, descText].filter(Boolean).join(" – ");
-
-        try {
-          const resp = await fetchFn(shot.url);
-          if (resp.ok) {
-            const buf = Buffer.from(await resp.arrayBuffer());
-            const resized = await sharp(buf)
-              .resize({ width: 1200, withoutEnlargement: true })
-              .jpeg({ quality: 80 })
-              .toBuffer();
-
-            doc.image(resized, x + 5, y + 5, {
-              fit: [cellWidth - 10, imageBoxHeight - 10],
-              align: "center",
-              valign: "center",
-            });
-          }
-        } catch (e) {
-          console.error("Image load failed:", shot.url, e);
-        }
-
-        if (caption) {
-          doc.fontSize(8).text(caption, x + 5, y + imageBoxHeight, {
-            width: cellWidth - 10,
-            align: "center",
+        // Scene header at top of every page for this scene
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(18)
+          .text(sceneName || "Scene", {
+            align: "left",
           });
+        doc.moveDown(0.5);
+
+        const headerBottomY = doc.y; // where header ended
+
+        const usableWidth =
+          doc.page.width - doc.page.margins.left - doc.page.margins.right;
+        const usableHeight =
+          doc.page.height - headerBottomY - doc.page.margins.bottom;
+
+        const cellWidth = usableWidth / COLS;
+        const cellHeight = usableHeight / ROWS;
+
+        for (let idx = 0; idx < pageShots.length; idx++) {
+          const shot = pageShots[idx];
+
+          const row = Math.floor(idx / COLS);
+          const col = idx % COLS;
+
+          const x = doc.page.margins.left + col * cellWidth;
+          const y = headerBottomY + row * cellHeight;
+
+          const imageHeight = cellHeight * 0.55; // 55% image, 45% text
+          const textX = x;
+          const textWidth = cellWidth - 6;
+          const textTop = y + imageHeight + 4;
+
+          // --- image ---
+          try {
+            if (shot.image) {
+              const resp = await fetchFn(shot.image);
+              if (resp.ok) {
+                const buf = Buffer.from(await resp.arrayBuffer());
+                const resized = await sharp(buf)
+                  .resize({ width: 1200, withoutEnlargement: true })
+                  .jpeg({ quality: 80 })
+                  .toBuffer();
+
+                doc.image(resized, x, y, {
+                  fit: [cellWidth - 6, imageHeight],
+                  align: "center",
+                  valign: "center",
+                });
+              }
+            }
+          } catch (e) {
+            console.error("Image failed:", shot.image, e);
+          }
+
+          // --- size (bold, small) ---
+          doc
+            .font("Helvetica-Bold")
+            .fontSize(9)
+            .text(shot.size || "", textX, textTop, {
+              width: textWidth,
+            });
+
+          // --- name (next line, small) ---
+          doc
+            .font("Helvetica")
+            .fontSize(9)
+            .text(shot.name || "", {
+              width: textWidth,
+            });
+
+          // --- description (below, wrapped) ---
+          doc
+            .font("Helvetica")
+            .fontSize(8)
+            .text(shot.description || "", {
+              width: textWidth,
+            });
         }
       }
     }
@@ -206,9 +210,6 @@ app.post("/generate", async (req, res) => {
     doc.end();
     const pdfBuffer = await done;
 
-    // ----------------------------------------------------
-    // Save & Respond
-    // ----------------------------------------------------
     const filename = `shotlist-${Date.now()}.pdf`;
     const filePath = path.join(pdfDir, filename);
     await fs.promises.writeFile(filePath, pdfBuffer);
@@ -217,7 +218,7 @@ app.post("/generate", async (req, res) => {
 
     res.json({
       filename,
-      pdfUrl,
+      pdfUrl, // Glide uses this in your PdfURL column
     });
   } catch (err) {
     console.error("PDF error:", err);
@@ -225,6 +226,7 @@ app.post("/generate", async (req, res) => {
   }
 });
 
+// --------------------------------------------------------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`PDF service running on port ${PORT}`);
