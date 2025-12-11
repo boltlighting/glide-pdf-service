@@ -9,9 +9,6 @@ import { fileURLToPath } from "url";
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-// If you ever use S3 later; safe to leave here.
-const BUCKET = process.env.S3_BUCKET;
-
 // Node 18+ fetch
 const fetchFn = globalThis.fetch;
 
@@ -58,7 +55,7 @@ app.post("/generate", async (req, res) => {
     let description = req.body?.description ?? req.query.description;
     let images = req.body?.images ?? req.query.images;
 
-    // Support a single string (from query like ?images=URL)
+    // Support a single string (e.g. joined list: "url1,url2,url3")
     if (typeof images === "string") {
       images = images
         .split(",")
@@ -154,26 +151,19 @@ app.post("/generate", async (req, res) => {
     const pdfBuffer = await done;
 
     // ----------------------------------------------------
-    // Turn PDF buffer into both base64 and a temporary URL
+    // Save PDF to disk and return a small JSON response
     // ----------------------------------------------------
-    const pdfBase64 = pdfBuffer.toString("base64");
-
-    // Unique-ish filename; could also use uuid() if you prefer
     const filename = `shotlist-${Date.now()}.pdf`;
-
     const filePath = path.join(pdfDir, filename);
 
-    // Write PDF file to local /pdfs folder
     await fs.promises.writeFile(filePath, pdfBuffer);
 
-    // Public URL that Render will serve via the static middleware above
     const pdfUrl = `https://glide-pdf-service.onrender.com/pdfs/${filename}`;
 
-    // Return JSON for Glide
+    // ✅ Only small fields back to Glide (no base64)
     res.json({
       filename,
-      pdfBase64, // still available if you ever need it
-      pdfUrl,    // <- use this in Glide Open Link
+      pdfUrl, // Use this in Glide's Open Link / WebView
     });
   } catch (err) {
     console.error("PDF error:", err);
