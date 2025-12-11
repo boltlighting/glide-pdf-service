@@ -1,13 +1,12 @@
 import express from "express";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
-import { v4 as uuid } from "uuid";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "1mb" })); // body not heavily used now
 
 // Node 18+ fetch
 const fetchFn = globalThis.fetch;
@@ -22,27 +21,52 @@ const __dirname = path.dirname(__filename);
 // Serve PDFs from /pdfs over HTTPS
 // --------------------------------------------------------
 const pdfDir = path.join(__dirname, "pdfs");
-// Make sure the folder exists (ok if it already does)
 fs.mkdirSync(pdfDir, { recursive: true });
-
 app.use("/pdfs", express.static(pdfDir));
 
 // --------------------------------------------------------
-// 🔥 FLEXIBLE GRID LOGIC
+// Constants
 // --------------------------------------------------------
-function chooseGrid(imagesLeft) {
-  if (imagesLeft === 1) return { rows: 1, cols: 1 };
-  if (imagesLeft === 2) return { rows: 1, cols: 2 };
-  if (imagesLeft <= 3) return { rows: 1, cols: imagesLeft };
-  if (imagesLeft <= 4) return { rows: 2, cols: 2 };
-  if (imagesLeft <= 6) return { rows: 2, cols: 3 };
-  if (imagesLeft <= 8) return { rows: 2, cols: 4 };
-  if (imagesLeft <= 9) return { rows: 3, cols: 3 };
-  if (imagesLeft <= 10) return { rows: 2, cols: 5 };
-  if (imagesLeft <= 12) return { rows: 3, cols: 4 };
+const JOIN_SEP = "|||";
 
-  // fallback for large sets (default 10 per page)
-  return { rows: 2, cols: 5 };
+// Fixed 2x4 grid: 2 columns x 4 rows = 8 images per page
+const GRID_COLS = 2;
+const GRID_ROWS = 4;
+const SHOTS_PER_PAGE = GRID_COLS * GRID_ROWS;
+
+// --------------------------------------------------------
+// Helpers
+// --------------------------------------------------------
+
+// Split a joined-list field (string) into an array using JOIN_SEP
+function splitField(val) {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  return String(val)
+    .split(JOIN_SEP)
+    .map((s) => s.trim());
+}
+
+// Group shots by scene while preserving order
+function groupByScene(shots) {
+  const groups = [];
+  let currentScene = null;
+  let currentGroup = [];
+
+  for (const shot of shots) {
+    const scene = shot.scene || "";
+    if (scene !== currentScene) {
+      // start a new group
+      if (currentGroup.length > 0) groups.push({ scene: currentScene, shots: currentGroup });
+      currentScene = scene;
+      currentGroup = [];
+    }
+    currentGroup.push(shot);
+  }
+  if (currentGroup.length > 0) {
+    groups.push({ scene: currentScene, shots: currentGroup });
+  }
+  return groups;
 }
 
 // --------------------------------------------------------
@@ -50,24 +74,45 @@ function chooseGrid(imagesLeft) {
 // --------------------------------------------------------
 app.post("/generate", async (req, res) => {
   try {
-    // ✅ Read from body *or* query string (for Glide)
-    let title = req.body?.title ?? req.query.title;
-    let description = req.body?.description ?? req.query.description;
-    let images = req.body?.images ?? req.query.images;
+    // Read from body OR query (Glide is using query string)
+    const title =
+      req.body?.title ??
+      req.query.title ??
+      "Shot List";
 
-    // Support a single string (e.g. joined list: "url1,url2,url3")
-    if (typeof images === "string") {
-      images = images
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-    }
+    const description =
+      req.body?.description ??
+      req.query.description ??
+      "";
 
-    if (!Array.isArray(images) || images.length === 0) {
+    const imagesRaw = req.body?.images ?? req.query.images;
+    const sizesRaw = req.body?.sizes ?? req.query.sizes;
+    const descsRaw = req.body?.descriptions ?? req.query.descriptions;
+    const scenesRaw = req.body?.scenes ?? req.query.scenes;
+
+    const imageList = splitField(imagesRaw);
+    const sizeList = splitField(sizesRaw);
+    const descList = splitField(descsRaw);
+    const sceneList = splitField(scenesRaw);
+
+    if (!imageList.length) {
       return res.status(400).json({ error: "no images provided" });
     }
 
+    // Build an array of shot objects aligned by index
+    const shots = imageList.map((url, i) => ({
+      url,
+      size: sizeList[i] || "",
+      desc: descList[i] || "",
+      scene: sceneList[i] || "",
+    }));
+
+    // Group shots by scene
+    const sceneGroups = groupByScene(shots);
+
+    // ----------------------------------------------------
     // Create PDF
+    // ----------------------------------------------------
     const doc = new PDFDocument({
       size: "A4",
       margin: 40,
@@ -81,89 +126,126 @@ app.post("/generate", async (req, res) => {
       doc.on("error", reject);
     });
 
-    // ---------------------------
-    // Intro page
-    // ---------------------------
+    // Optional intro page with global title/description
     doc.addPage();
-    doc.fontSize(22).text(title || "Shot List", { align: "center" });
+    doc.fontSize(22).text(title, { align: "center" });
     doc.moveDown();
     if (description) {
-      doc.fontSize(12).text(description, { align: "center" });
+      doc.fontSize(12).text(description, {
+        align: "center",
+      });
     }
 
-    // ---------------------------
-    // Image Pages (dynamic grid)
-    // ---------------------------
-    let remaining = images.length;
-    let index = 0;
+    // ----------------------------------------------------
+    // Scene pages with 2x4 grid
+    // ----------------------------------------------------
+    for (const group of sceneGroups) {
+      const sceneLabel = group.scene || "";
 
-    while (remaining > 0) {
-      const { rows, cols } = chooseGrid(remaining);
-      const perPage = rows * cols;
+      const shotsInScene = group.shots;
+      let pageIndex = 0;
 
-      doc.addPage();
+      for (let i = 0; i < shotsInScene.length; i++) {
+        // New page every SHOTS_PER_PAGE or at first shot in scene
+        if (i % SHOTS_PER_PAGE === 0) {
+          doc.addPage();
 
-      // Calculate area
-      const usableWidth =
-        doc.page.width - doc.page.margins.left - doc.page.margins.right;
-      const usableHeight =
-        doc.page.height - doc.page.margins.top - doc.page.margins.bottom;
+          // Scene header at top of each page for that scene
+          if (sceneLabel) {
+            doc.fontSize(18).text(sceneLabel, {
+              align: "left",
+            });
+            doc.moveDown(0.5);
+          }
 
-      const cellWidth = usableWidth / cols;
-      const cellHeight = usableHeight / rows;
+          // You can optionally repeat global title smaller here if you want
+          // doc.fontSize(10).text(title, { align: "right" });
 
-      // Fill this page
-      for (let i = 0; i < perPage && index < images.length; i++, index++) {
-        const url = images[index];
+          pageIndex++;
+        }
 
+        const shot = shotsInScene[i];
+
+        // Layout calculations
+        const page = doc.page;
+        const margins = page.margins;
+
+        const headerSpace = sceneLabel ? 30 : 0;
+
+        const usableWidth = page.width - margins.left - margins.right;
+        const usableHeight = page.height - margins.top - margins.bottom - headerSpace;
+
+        const cellWidth = usableWidth / GRID_COLS;
+        const cellHeight = usableHeight / GRID_ROWS;
+
+        const indexOnPage = i % SHOTS_PER_PAGE;
+        const cellRow = Math.floor(indexOnPage / GRID_COLS);
+        const cellCol = indexOnPage % GRID_COLS;
+
+        const x = margins.left + cellCol * cellWidth;
+        const y = margins.top + headerSpace + cellRow * cellHeight;
+
+        // Reserve some vertical space at bottom of cell for caption
+        const imageBoxHeight = cellHeight - 30; // 30 px for caption
+
+        // Build caption from size + description (no scene)
+        const sizeText = (shot.size || "").trim();
+        const descText = (shot.desc || "").trim();
+        const captionParts = [];
+        if (sizeText) captionParts.push(sizeText);
+        if (descText) captionParts.push(descText);
+        const caption = captionParts.join(" – ");
+
+        // Fetch and draw image
         try {
-          const resp = await fetchFn(url);
-          if (!resp.ok) continue;
-          const buf = Buffer.from(await resp.arrayBuffer());
+          const resp = await fetchFn(shot.url);
+          if (resp.ok) {
+            const buf = Buffer.from(await resp.arrayBuffer());
 
-          // Resize + compress
-          const resized = await sharp(buf)
-            .resize({ width: 1200, withoutEnlargement: true })
-            .jpeg({ quality: 80 })
-            .toBuffer();
+            const resized = await sharp(buf)
+              .resize({ width: 1200, withoutEnlargement: true })
+              .jpeg({ quality: 80 })
+              .toBuffer();
 
-          // Position
-          const row = Math.floor(i / cols);
-          const col = i % cols;
-
-          const x = doc.page.margins.left + col * cellWidth;
-          const y = doc.page.margins.top + row * cellHeight;
-
-          doc.image(resized, x, y, {
-            fit: [cellWidth - 10, cellHeight - 10],
-            align: "center",
-            valign: "center",
-          });
+            doc.image(resized, x + 5, y + 5, {
+              fit: [cellWidth - 10, imageBoxHeight - 10],
+              align: "center",
+              valign: "center",
+            });
+          } else {
+            console.error("Image fetch failed:", shot.url, resp.status);
+          }
         } catch (e) {
-          console.error("Image failed:", url, e);
+          console.error("Image failed:", shot.url, e);
+        }
+
+        // Caption
+        if (caption) {
+          doc.fontSize(8).text(caption, x + 5, y + imageBoxHeight, {
+            width: cellWidth - 10,
+            align: "center",
+          });
         }
       }
-
-      remaining -= perPage;
     }
 
     doc.end();
     const pdfBuffer = await done;
 
     // ----------------------------------------------------
-    // Save PDF to disk and return a small JSON response
+    // Save PDF and return URL + base64
     // ----------------------------------------------------
     const filename = `shotlist-${Date.now()}.pdf`;
     const filePath = path.join(pdfDir, filename);
-
     await fs.promises.writeFile(filePath, pdfBuffer);
 
     const pdfUrl = `https://glide-pdf-service.onrender.com/pdfs/${filename}`;
+    const pdfBase64 = pdfBuffer.toString("base64");
 
-    // ✅ Only small fields back to Glide (no base64)
     res.json({
       filename,
-      pdfUrl, // Use this in Glide's Open Link / WebView
+      pdfUrl,
+      pdfBase64,
     });
   } catch (err) {
     console.error("PDF error:", err);
