@@ -15,15 +15,15 @@ app.use(express.json({ limit: "1mb" }));
 const fetchFn = globalThis.fetch;
 
 // --------------------------------------------------------
-// ESM-compatible __dirname
+// ESM-compatible __dirname (not really used now, but harmless)
 // --------------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // --------------------------------------------------------
-// Serve PDFs from /pdfs over HTTPS
+// Serve PDFs from /tmp/pdfs over HTTPS (Render-safe)
 // --------------------------------------------------------
-const pdfDir = path.join("/tmp", "pdfs");
+const pdfDir = process.env.PDF_DIR || path.join("/tmp", "pdfs");
 fs.mkdirSync(pdfDir, { recursive: true });
 app.use("/pdfs", express.static(pdfDir));
 
@@ -78,6 +78,15 @@ app.post("/generate", async (req, res) => {
       descriptions,
     ]);
 
+    console.log("Counts:", {
+      images: images.length,
+      scenes: scenes.length,
+      sizes: sizes.length,
+      descriptions: descriptions.length,
+      names: names.length,
+      usableCount,
+    });
+
     if (!Number.isFinite(usableCount) || usableCount === 0) {
       return res.status(400).json({
         error: "no valid shots provided",
@@ -101,6 +110,8 @@ app.post("/generate", async (req, res) => {
         name: names[i] || `Shot ${i + 1}`,
       });
     }
+
+    console.log("Total shots:", shots.length);
 
     // ----------------------------------------------------
     // Create PDF
@@ -126,14 +137,16 @@ app.post("/generate", async (req, res) => {
 
     let i = 0;
     while (i < shots.length) {
-      const sceneName = shots[i].scene || "";
+      const sceneName = (shots[i] && shots[i].scene) || "";
 
       // collect contiguous shots for this scene
       const sceneShots = [];
-      while (i < shots.length && shots[i].scene === sceneName) {
+      while (i < shots.length && shots[i] && shots[i].scene === sceneName) {
         sceneShots.push(shots[i]);
         i++;
       }
+
+      console.log(`Scene "${sceneName}" has ${sceneShots.length} shots`);
 
       // paginate this scene’s shots, 8 per page
       let offset = 0;
@@ -164,18 +177,24 @@ app.post("/generate", async (req, res) => {
         const cellWidth = usableWidth / COLS;
         const cellHeight = usableHeight / ROWS;
 
-        // If the math goes weird for some reason, skip drawing
         if (cellWidth <= 0 || cellHeight <= 0) {
-          console.warn(
-            "Invalid cell size",
-            cellWidth,
-            cellHeight
-          );
+          console.warn("Invalid cell size", cellWidth, cellHeight);
           continue;
         }
 
+        // Draw each shot for this page
         for (let idx = 0; idx < pageShots.length; idx++) {
           const shot = pageShots[idx];
+
+          // SAFETY CHECK — prevents crashes like "Cannot read properties of undefined"
+          if (!shot) {
+            console.warn(
+              "Undefined shot in pageShots at index:",
+              idx,
+              pageShots
+            );
+            continue;
+          }
 
           const row = Math.floor(idx / COLS);
           const col = idx % COLS;
@@ -193,9 +212,7 @@ app.post("/generate", async (req, res) => {
             if (shot.image) {
               const resp = await fetchFn(shot.image);
               if (resp.ok) {
-                const buf = Buffer.from(
-                  await resp.arrayBuffer()
-                );
+                const buf = Buffer.from(await resp.arrayBuffer());
                 const resized = await sharp(buf)
                   .resize({
                     width: 1200,
@@ -253,7 +270,9 @@ app.post("/generate", async (req, res) => {
 
     const filename = `shotlist-${Date.now()}.pdf`;
     const filePath = path.join(pdfDir, filename);
+    console.log("Writing PDF to", filePath, "size", pdfBuffer.length);
     await fs.promises.writeFile(filePath, pdfBuffer);
+    console.log("PDF written OK");
 
     const pdfUrl = `https://glide-pdf-service.onrender.com/pdfs/${filename}`;
 
@@ -263,7 +282,6 @@ app.post("/generate", async (req, res) => {
     });
   } catch (err) {
     console.error("PDF error:", err);
-    // send the actual error back so we can see it in Glide
     res.status(500).json({
       error: "PDF generation failed",
       message: err?.message || String(err),
