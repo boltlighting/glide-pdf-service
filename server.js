@@ -7,8 +7,8 @@ import { fileURLToPath } from "url";
 
 const app = express();
 
-// We still accept JSON bodies if you ever use them,
-// but Glide is sending everything via query string.
+// Glide sends query-string params; body is usually empty.
+// Keep JSON parser but small limit so we don't hit size issues.
 app.use(express.json({ limit: "1mb" }));
 
 // Node 18+ global fetch
@@ -44,7 +44,8 @@ function splitList(value) {
 // Safely get the minimum length across all arrays
 function minLength(arrays) {
   return arrays.reduce(
-    (min, arr) => Math.min(min, Array.isArray(arr) ? arr.length : 0),
+    (min, arr) =>
+      Math.min(min, Array.isArray(arr) ? arr.length : 0),
     Infinity
   );
 }
@@ -54,22 +55,39 @@ function minLength(arrays) {
 // --------------------------------------------------------
 app.post("/generate", async (req, res) => {
   try {
+    // For debugging: log raw query keys (won't leak in Glide)
+    console.log("Incoming query:", req.query);
+
     // Glide is sending these as query string parameters
     const imagesRaw = req.query.images ?? req.body.images;
     const scenesRaw = req.query.scene ?? req.body.scene;
     const sizesRaw = req.query.size ?? req.body.size;
     const descRaw = req.query.description ?? req.body.description;
-    const namesRaw = req.query.name ?? req.body.name; // optional "name" list
+    const namesRaw = req.query.name ?? req.body.name; // optional
 
     const images = splitList(imagesRaw);
     const scenes = splitList(scenesRaw);
     const sizes = splitList(sizesRaw);
     const descriptions = splitList(descRaw);
-    const names = splitList(namesRaw); // may be shorter/empty
+    const names = splitList(namesRaw); // may be empty or shorter
 
-    const usableCount = minLength([images, scenes, sizes, descriptions]);
+    const usableCount = minLength([
+      images,
+      scenes,
+      sizes,
+      descriptions,
+    ]);
+
     if (!Number.isFinite(usableCount) || usableCount === 0) {
-      return res.status(400).json({ error: "no valid shots provided" });
+      return res.status(400).json({
+        error: "no valid shots provided",
+        details: {
+          images: images.length,
+          scenes: scenes.length,
+          sizes: sizes.length,
+          descriptions: descriptions.length,
+        },
+      });
     }
 
     // Trim all arrays to same usable length
@@ -80,7 +98,7 @@ app.post("/generate", async (req, res) => {
         scene: scenes[i],
         size: sizes[i],
         description: descriptions[i],
-        name: names[i] || `Shot ${i + 1}`, // fallback if no name passed
+        name: names[i] || `Shot ${i + 1}`,
       });
     }
 
@@ -106,18 +124,18 @@ app.post("/generate", async (req, res) => {
     const ROWS = 4;
     const PER_PAGE = COLS * ROWS;
 
-    // Group shots by scene (contiguous groups)
     let i = 0;
     while (i < shots.length) {
       const sceneName = shots[i].scene || "";
 
+      // collect contiguous shots for this scene
       const sceneShots = [];
       while (i < shots.length && shots[i].scene === sceneName) {
         sceneShots.push(shots[i]);
         i++;
       }
 
-      // Now paginate this scene’s shots, 8 per page
+      // paginate this scene’s shots, 8 per page
       let offset = 0;
       while (offset < sceneShots.length) {
         const pageShots = sceneShots.slice(offset, offset + PER_PAGE);
@@ -129,20 +147,32 @@ app.post("/generate", async (req, res) => {
         doc
           .font("Helvetica-Bold")
           .fontSize(18)
-          .text(sceneName || "Scene", {
-            align: "left",
-          });
+          .text(sceneName || "Scene", { align: "left" });
         doc.moveDown(0.5);
 
-        const headerBottomY = doc.y; // where header ended
+        const headerBottomY = doc.y;
 
         const usableWidth =
-          doc.page.width - doc.page.margins.left - doc.page.margins.right;
+          doc.page.width -
+          doc.page.margins.left -
+          doc.page.margins.right;
         const usableHeight =
-          doc.page.height - headerBottomY - doc.page.margins.bottom;
+          doc.page.height -
+          headerBottomY -
+          doc.page.margins.bottom;
 
         const cellWidth = usableWidth / COLS;
         const cellHeight = usableHeight / ROWS;
+
+        // If the math goes weird for some reason, skip drawing
+        if (cellWidth <= 0 || cellHeight <= 0) {
+          console.warn(
+            "Invalid cell size",
+            cellWidth,
+            cellHeight
+          );
+          continue;
+        }
 
         for (let idx = 0; idx < pageShots.length; idx++) {
           const shot = pageShots[idx];
@@ -163,9 +193,14 @@ app.post("/generate", async (req, res) => {
             if (shot.image) {
               const resp = await fetchFn(shot.image);
               if (resp.ok) {
-                const buf = Buffer.from(await resp.arrayBuffer());
+                const buf = Buffer.from(
+                  await resp.arrayBuffer()
+                );
                 const resized = await sharp(buf)
-                  .resize({ width: 1200, withoutEnlargement: true })
+                  .resize({
+                    width: 1200,
+                    withoutEnlargement: true,
+                  })
                   .jpeg({ quality: 80 })
                   .toBuffer();
 
@@ -174,6 +209,12 @@ app.post("/generate", async (req, res) => {
                   align: "center",
                   valign: "center",
                 });
+              } else {
+                console.warn(
+                  "Image fetch not OK:",
+                  shot.image,
+                  resp.status
+                );
               }
             }
           } catch (e) {
@@ -218,11 +259,16 @@ app.post("/generate", async (req, res) => {
 
     res.json({
       filename,
-      pdfUrl, // Glide uses this in your PdfURL column
+      pdfUrl,
     });
   } catch (err) {
     console.error("PDF error:", err);
-    res.status(500).json({ error: "PDF generation failed" });
+    // send the actual error back so we can see it in Glide
+    res.status(500).json({
+      error: "PDF generation failed",
+      message: err?.message || String(err),
+      stack: err?.stack || null,
+    });
   }
 });
 
