@@ -1,4 +1,4 @@
-console.log("PDF SERVER VERSION 3", new Date().toISOString());
+console.log("PDF SERVER VERSION 4", new Date().toISOString());
 
 import express from "express";
 import PDFDocument from "pdfkit";
@@ -17,7 +17,7 @@ app.use(express.json({ limit: "1mb" }));
 const fetchFn = globalThis.fetch;
 
 // --------------------------------------------------------
-// ESM-compatible __dirname (not really used now, but harmless)
+// ESM-compatible __dirname
 // --------------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
