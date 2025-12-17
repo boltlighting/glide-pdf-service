@@ -142,85 +142,79 @@ app.post("/generate", async (req, res) => {
     });
 
     // ----------------------------------------------------
-    // Layout: row-based, no overlap
+    // Layout: y-cursor based (prevents big header gaps)
     // ----------------------------------------------------
     const COLS = 2;
     const IMAGE_HEIGHT = 135;
     const TEXT_BLOCK_HEIGHT = 70; // size + name + description
     const ROW_SPACING = 12;
 
-    function computeLayout() {
+    const HEADER_TEXT_SIZE = 18;
+    const HEADER_LINE_GAP = 6;  // space between header text and line
+    const HEADER_AFTER_GAP = 10; // space after line before first row
+    const HEADER_HEIGHT = 22 + HEADER_LINE_GAP + 1 + HEADER_AFTER_GAP; // ~header box
+
+    const SHOT_ROW_HEIGHT = IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
+
+    function pageMetrics() {
       const page = doc.page;
       const margins = page.margins;
-
-      const usableHeight = page.height - margins.top - margins.bottom;
-      const rowHeight = IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
-      const maxRows = Math.floor(usableHeight / rowHeight);
-
-      const usableWidth = page.width - margins.left - margins.right;
-
-      return { rowHeight, maxRows, usableWidth };
+      const left = margins.left;
+      const top = margins.top;
+      const right = page.width - margins.right;
+      const bottom = page.height - margins.bottom;
+      const usableWidth = right - left;
+      return { page, margins, left, top, right, bottom, usableWidth };
     }
 
-    function startNewPage() {
+    function newPage() {
       doc.addPage();
-      const layout = computeLayout();
-      return {
-        rowIndex: 0, // 0..maxRows-1
-        layout,
-      };
+      const { top } = pageMetrics();
+      return top;
     }
 
-    function ensureRows(state, neededRows) {
-      if (state.rowIndex + neededRows > state.layout.maxRows) {
-        state = startNewPage();
+    function ensureSpace(y, neededHeight) {
+      const { bottom } = pageMetrics();
+      if (y + neededHeight > bottom) {
+        y = newPage();
       }
-      return state;
+      return y;
     }
 
-    function drawHeaderRow(sceneName, state) {
-      const { rowHeight, usableWidth } = state.layout;
-      const page = doc.page;
-      const margins = page.margins;
-
-      const y = margins.top + state.rowIndex * rowHeight;
+    function drawSceneHeader(sceneName, y) {
+      const { left, right, usableWidth } = pageMetrics();
 
       doc
         .font(hasGillSans ? GILL_SANS_PATH : "Helvetica-Bold")
-        .fontSize(18)
-        .text(sceneName || "Scene", margins.left, y, {
+        .fontSize(HEADER_TEXT_SIZE)
+        .text(sceneName || "Scene", left, y, {
           width: usableWidth,
           align: "left",
         });
 
-      const lineY = y + 22;
+      const lineY = y + 22 + HEADER_LINE_GAP;
       doc
-        .moveTo(margins.left, lineY)
-        .lineTo(page.width - margins.right, lineY)
+        .moveTo(left, lineY)
+        .lineTo(right, lineY)
         .lineWidth(0.5)
         .stroke();
 
-      state.rowIndex += 1; // header consumes one full row
+      return lineY + 1 + HEADER_AFTER_GAP;
     }
 
-    async function drawShotRow(sceneShots, startIndex, state) {
+    async function drawShotRow(sceneShots, startIndex, y) {
       let i = startIndex;
 
-      const { rowHeight, usableWidth } = state.layout;
-      const page = doc.page;
-      const margins = page.margins;
-
+      const { left, usableWidth } = pageMetrics();
       const cellWidth = usableWidth / COLS;
-      const y = margins.top + state.rowIndex * rowHeight;
-      const imageHeight = IMAGE_HEIGHT;
 
       for (let col = 0; col < COLS && i < sceneShots.length; col++, i++) {
         const shot = sceneShots[i] || {};
-        const x = margins.left + col * cellWidth;
+        const x = left + col * cellWidth;
 
         const textX = x;
         const textWidth = cellWidth - 6;
-        const textTop = y + imageHeight + 4;
+        const textTop = y + IMAGE_HEIGHT + 4;
 
         const imageUrl = shot.image || "";
         const sizeLabel = shot.size || "";
@@ -234,15 +228,12 @@ app.post("/generate", async (req, res) => {
             if (resp.ok) {
               const buf = Buffer.from(await resp.arrayBuffer());
               const resized = await sharp(buf)
-                .resize({
-                  width: 1200,
-                  withoutEnlargement: true,
-                })
+                .resize({ width: 1200, withoutEnlargement: true })
                 .jpeg({ quality: 80 })
                 .toBuffer();
 
               doc.image(resized, x, y, {
-                fit: [cellWidth - 6, imageHeight],
+                fit: [cellWidth - 6, IMAGE_HEIGHT],
                 align: "center",
                 valign: "center",
               });
@@ -270,29 +261,29 @@ app.post("/generate", async (req, res) => {
         });
       }
 
-      state.rowIndex += 1; // one full row of shots
       return i; // next shot index
     }
 
     // Start first page
-    let state = startNewPage();
+    let y = newPage();
 
     for (const group of sceneGroups) {
       const sceneName = group.sceneName;
       const sceneShots = group.shots;
       let shotIndex = 0;
 
-      // Ensure we don't orphan a header at the bottom:
-      // need 1 row for header + at least 1 row of shots
-      state = ensureRows(state, 2);
-      drawHeaderRow(sceneName, state);
+      // Put the header on this page only if there's room for:
+      // header + at least 1 shot row
+      y = ensureSpace(y, HEADER_HEIGHT + SHOT_ROW_HEIGHT);
+      y = drawSceneHeader(sceneName, y);
 
       while (shotIndex < sceneShots.length) {
-        // If we need a new page mid-scene, DO NOT repeat the scene header.
-        state = ensureRows(state, 1);
+        // If the scene continues onto a new page, DO NOT repeat the header.
+        y = ensureSpace(y, SHOT_ROW_HEIGHT);
 
         // Draw one row of up to 2 shots
-        shotIndex = await drawShotRow(sceneShots, shotIndex, state);
+        shotIndex = await drawShotRow(sceneShots, shotIndex, y);
+        y += SHOT_ROW_HEIGHT;
       }
     }
 
