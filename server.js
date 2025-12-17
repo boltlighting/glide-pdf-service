@@ -46,8 +46,7 @@ function splitList(value) {
 
 function minLength(arrays) {
   return arrays.reduce(
-    (min, arr) =>
-      Math.min(min, Array.isArray(arr) ? arr.length : 0),
+    (min, arr) => Math.min(min, Array.isArray(arr) ? arr.length : 0),
     Infinity
   );
 }
@@ -59,10 +58,7 @@ function groupByScene(shots) {
   while (i < shots.length) {
     const sceneName = shots[i].scene || "";
     const groupShots = [];
-    while (
-      i < shots.length &&
-      (shots[i].scene || "") === sceneName
-    ) {
+    while (i < shots.length && (shots[i].scene || "") === sceneName) {
       groupShots.push(shots[i]);
       i++;
     }
@@ -90,12 +86,7 @@ app.post("/generate", async (req, res) => {
     const descriptions = splitList(descRaw);
     const names = splitList(namesRaw);
 
-    const usableCount = minLength([
-      images,
-      scenes,
-      sizes,
-      descriptions,
-    ]);
+    const usableCount = minLength([images, scenes, sizes, descriptions]);
 
     console.log("Counts:", {
       images: images.length,
@@ -161,13 +152,13 @@ app.post("/generate", async (req, res) => {
     function computeLayout() {
       const page = doc.page;
       const margins = page.margins;
-      const usableHeight =
-        page.height - margins.top - margins.bottom;
-      const rowHeight =
-        IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
+
+      const usableHeight = page.height - margins.top - margins.bottom;
+      const rowHeight = IMAGE_HEIGHT + TEXT_BLOCK_HEIGHT + ROW_SPACING;
       const maxRows = Math.floor(usableHeight / rowHeight);
-      const usableWidth =
-        page.width - margins.left - margins.right;
+
+      const usableWidth = page.width - margins.left - margins.right;
+
       return { rowHeight, maxRows, usableWidth };
     }
 
@@ -181,8 +172,7 @@ app.post("/generate", async (req, res) => {
     }
 
     function ensureRows(state, neededRows) {
-      const { rowHeight, maxRows } = state.layout;
-      if (state.rowIndex + neededRows > maxRows) {
+      if (state.rowIndex + neededRows > state.layout.maxRows) {
         state = startNewPage();
       }
       return state;
@@ -213,13 +203,14 @@ app.post("/generate", async (req, res) => {
       state.rowIndex += 1; // header consumes one full row
     }
 
-    function drawShotRow(sceneName, sceneShots, startIndex, state) {
+    async function drawShotRow(sceneShots, startIndex, state) {
       let i = startIndex;
+
       const { rowHeight, usableWidth } = state.layout;
       const page = doc.page;
       const margins = page.margins;
-      const cellWidth = usableWidth / COLS;
 
+      const cellWidth = usableWidth / COLS;
       const y = margins.top + state.rowIndex * rowHeight;
       const imageHeight = IMAGE_HEIGHT;
 
@@ -264,28 +255,19 @@ app.post("/generate", async (req, res) => {
         }
 
         // --- size ---
-        doc
-          .font("Helvetica-Bold")
-          .fontSize(9)
-          .text(sizeLabel, textX, textTop, {
-            width: textWidth,
-          });
+        doc.font("Helvetica-Bold").fontSize(9).text(sizeLabel, textX, textTop, {
+          width: textWidth,
+        });
 
         // --- name ---
-        doc
-          .font("Helvetica")
-          .fontSize(9)
-          .text(shotName, {
-            width: textWidth,
-          });
+        doc.font("Helvetica").fontSize(9).text(shotName, {
+          width: textWidth,
+        });
 
         // --- description ---
-        doc
-          .font("Helvetica")
-          .fontSize(8)
-          .text(description, {
-            width: textWidth,
-          });
+        doc.font("Helvetica").fontSize(8).text(description, {
+          width: textWidth,
+        });
       }
 
       state.rowIndex += 1; // one full row of shots
@@ -300,26 +282,17 @@ app.post("/generate", async (req, res) => {
       const sceneShots = group.shots;
       let shotIndex = 0;
 
-      // Need at least 1 row for header + 1 row for shots
+      // Ensure we don't orphan a header at the bottom:
+      // need 1 row for header + at least 1 row of shots
       state = ensureRows(state, 2);
       drawHeaderRow(sceneName, state);
 
       while (shotIndex < sceneShots.length) {
-        // If we ran out of rows, new page + repeat header
+        // If we need a new page mid-scene, DO NOT repeat the scene header.
         state = ensureRows(state, 1);
-        if (state.rowIndex === 0 && shotIndex > 0) {
-          // just started a new page while still in this scene
-          state = ensureRows(state, 2);
-          drawHeaderRow(sceneName, state);
-        }
 
         // Draw one row of up to 2 shots
-        shotIndex = await drawShotRow(
-          sceneName,
-          sceneShots,
-          shotIndex,
-          state
-        );
+        shotIndex = await drawShotRow(sceneShots, shotIndex, state);
       }
     }
 
@@ -329,12 +302,12 @@ app.post("/generate", async (req, res) => {
 
     const filename = `shotlist-${Date.now()}.pdf`;
     const filePath = path.join(pdfDir, filename);
+
     console.log("Writing PDF to", filePath, "size", pdfBuffer.length);
     await fs.promises.writeFile(filePath, pdfBuffer);
     console.log("PDF written OK");
 
     const pdfUrl = `https://glide-pdf-service.onrender.com/pdfs/${filename}`;
-
     res.json({ filename, pdfUrl });
   } catch (err) {
     console.error("PDF error:", err);
